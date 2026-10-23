@@ -1,14 +1,16 @@
 name: Release
 
-# Push a tag like v1.6.1 and GitHub builds Lumen.exe and Lumen-arm64.exe from
-# this source, runs the tests, and publishes them as a release with checksums.
+# Builds Lumen.exe and Lumen-arm64.exe from this source, runs the tests, and
+# publishes them as a GitHub release with checksums. Start it by pushing a tag
+# like v1.6.1, or from Actions → Release → Run workflow (the tag is created on
+# the chosen branch's latest commit if it doesn't exist yet).
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to (re)build, e.g. v1.6.1"
+        description: "Version tag to publish, e.g. v1.6.1"
         required: true
 
 permissions:
@@ -22,8 +24,6 @@ jobs:
       CGO_ENABLED: "0"
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - uses: actions/setup-go@v5
         with:
@@ -64,6 +64,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
           name: Lumen ${{ env.TAG }}
           body_path: release-notes.md
           make_latest: true
