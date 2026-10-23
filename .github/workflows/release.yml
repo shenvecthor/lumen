@@ -1,0 +1,73 @@
+name: Release
+
+# Push a tag like v1.6.1 and GitHub builds Lumen.exe and Lumen-arm64.exe from
+# this source, runs the tests, and publishes them as a release with checksums.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build, e.g. v1.6.1"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: go test ./...
+
+      - name: Windows resources (icon, version info, manifest)
+        run: |
+          go install github.com/tc-hib/go-winres@latest
+          go-winres make --arch amd64,arm64
+
+      - name: Build
+        run: |
+          mkdir -p dist
+          GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-H windowsgui -s -w" -o dist/Lumen.exe .
+          GOOS=windows GOARCH=arm64 go build -trimpath -ldflags "-H windowsgui -s -w" -o dist/Lumen-arm64.exe .
+          GOOS=windows go vet ./...
+          ls -l dist
+
+      - name: Checksums and release notes
+        run: |
+          cd dist
+          sha256sum Lumen.exe Lumen-arm64.exe > SHA256SUMS.txt
+          cd ..
+          notes=".github/release-notes/${TAG}.md"
+          { if [ -f "$notes" ]; then cat "$notes"; else echo "Lumen ${TAG#v}"; fi
+            echo
+            echo "### SHA-256 checksums"
+            echo '```'
+            cat dist/SHA256SUMS.txt
+            echo '```'
+            echo 'Check yours in PowerShell: `Get-FileHash .\Lumen.exe`'
+          } > release-notes.md
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: Lumen ${{ env.TAG }}
+          body_path: release-notes.md
+          make_latest: true
+          files: |
+            dist/Lumen.exe
+            dist/Lumen-arm64.exe
+            dist/SHA256SUMS.txt
