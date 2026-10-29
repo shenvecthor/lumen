@@ -127,7 +127,7 @@ jobs:
           # every DLL libmpv needs that isn't part of Windows
           (ntldd -R $OUT/libmpv-2.dll || ldd $OUT/libmpv-2.dll) | tr '\\' '/' | grep -E '=> [A-Za-z]:/|=> /' | grep -viE '/windows/|not found' | sed -E 's/.*=> ([^ ]+).*/\1/' | sort -u > deps.txt
           cat deps.txt
-          while read -r d; do cp "$(cygpath -u "$d")" $OUT/; done < deps.txt
+          while read -r d; do f=$(cygpath -u "$d"); [ -f "$OUT/$(basename "$f")" ] || cp "$f" $OUT/; done < deps.txt
           # notices: our own builds + the MSYS2 package that provided each other DLL
           {
             echo "Lumen playback engine (LGPL build ${{ github.event.inputs.build }}, ${{ matrix.arch }})"
