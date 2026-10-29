@@ -119,6 +119,7 @@ jobs:
       - name: Collect engine, licenses and notices
         run: |
           set -eo pipefail
+          trap 'echo "::error title=collect failed::line $LINENO: $BASH_COMMAND"' ERR
           P=$(cygpath -u "$GITHUB_WORKSPACE")/prefix
           OUT=$PWD/out/engine; mkdir -p $OUT/licenses
           cp $P/bin/*.dll $OUT/                      # libmpv, FFmpeg (av*, sw*) and the helper
