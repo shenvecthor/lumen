@@ -1,26 +1,29 @@
 name: Release
 
-# Builds Lumen.exe and Lumen-arm64.exe from this source, runs the tests, and
-# publishes them as a GitHub release with checksums. Start it by pushing a tag
-# like v1.6.1, or from Actions → Release → Run workflow (the tag is created on
-# the chosen branch's latest commit if it doesn't exist yet).
+# Builds Lumen for x64 and ARM64, adds the LGPL playback engine (from the
+# engine release, see engine.yml), and publishes installers and portable zips.
+# Start it by pushing a tag like v1.7.0, or from Actions → Release → Run
+# workflow (the tag is created on the chosen branch's latest commit).
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Version tag to publish, e.g. v1.6.1"
+        description: "Version tag to publish, e.g. v1.7.0"
         required: true
 
 permissions:
   contents: write
 
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  ENGINE_TAG: engine-1
+
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
     env:
-      TAG: ${{ github.event.inputs.tag || github.ref_name }}
       CGO_ENABLED: "0"
     steps:
       - uses: actions/checkout@v4
@@ -39,29 +42,118 @@ jobs:
 
       - name: Build
         run: |
-          mkdir -p dist
-          GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-H windowsgui -s -w" -o dist/Lumen.exe .
-          GOOS=windows GOARCH=arm64 go build -trimpath -ldflags "-H windowsgui -s -w" -o dist/Lumen-arm64.exe .
+          GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-H windowsgui -s -w" -o dist/x64/Lumen.exe .
+          GOOS=windows GOARCH=arm64 go build -trimpath -ldflags "-H windowsgui -s -w" -o dist/arm64/Lumen.exe .
           GOOS=windows go vet ./...
-          ls -l dist
 
+      - name: Add the playback engine and notices
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V=${TAG#v}
+          gh release download "$ENGINE_TAG" --repo "${{ github.repository }}" --pattern 'lumen-engine-*.zip' --dir engine-dl
+          mkdir -p out
+          for a in x64 arm64; do
+            S=stage/$a; mkdir -p $S
+            cp dist/$a/Lumen.exe $S/
+            unzip -q engine-dl/lumen-engine-$a.zip -d $S          # → $S/engine/...
+            cp LICENSE $S/LICENSE.txt
+            {
+              echo "Lumen $V — third-party software"
+              echo "=================================="
+              echo
+              echo "Lumen is © 2026 Shane Sahadeo, MIT License (LICENSE.txt)."
+              echo
+              echo "go-webview2 (MIT) — https://github.com/jchv/go-webview2"
+              echo
+              cat third_party/go-webview2/LICENSE
+              echo
+              echo "Playback engine (engine folder)"
+              echo "-------------------------------"
+              echo "The engine folder holds libmpv and FFmpeg, built as LGPL-2.1-or-later"
+              echo "libraries (no GPL or non-free parts), plus the libraries they use. They are"
+              echo "separate DLLs: you may replace them with your own compatible builds. Their"
+              echo "licenses are in engine\\licenses and the full list with source links is in"
+              echo "engine\\THIRD-PARTY-NOTICES.txt. The exact build recipe is"
+              echo ".github/workflows/engine.yml in https://github.com/${{ github.repository }}"
+              echo "(engine release $ENGINE_TAG)."
+            } > $S/THIRD-PARTY-NOTICES.txt
+            {
+              echo "Lumen $V"
+              echo
+              echo "Lightweight, modern media player for Windows. Made with love by Shane Sahadeo."
+              echo
+              echo "Start Lumen.exe. Keep the engine folder next to it: it plays the formats"
+              echo "Windows' built-in player can't (AVI, WMV, MPEG, DTS/AC-3 audio, HEVC,"
+              echo "Blu-ray and DVD subtitles and more). Without it Lumen still plays the"
+              echo "common formats."
+              echo
+              echo "Settings are stored in %LOCALAPPDATA%\\Lumen. Nothing else is written."
+              echo
+              echo "https://github.com/${{ github.repository }}"
+            } > $S/README.txt
+            mkdir -p port/$a/Lumen && cp -r $S/. port/$a/Lumen/
+            (cd port/$a && zip -qr9 ../../out/Lumen-$V-portable-$a.zip Lumen)
+          done
+          ls -la out stage/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stage
+          path: stage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portable
+          path: out/*.zip
+
+  installer:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: stage
+          path: stage
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+          $v = "$env:TAG".TrimStart("v")
+          foreach ($a in "x64", "arm64") {
+            & $iscc /Q "/DAppVersion=$v" "/DArch=$a" "/DSourceDir=$PWD\stage\$a" installer\lumen.iss
+            if ($LASTEXITCODE -ne 0) { throw "ISCC failed for $a" }
+          }
+          Get-ChildItem out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers
+          path: out/*.exe
+
+  publish:
+    needs: [build, installer]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dl
+          pattern: "{portable,installers}"
+          merge-multiple: true
       - name: Checksums and release notes
         run: |
-          cd dist
-          sha256sum Lumen.exe Lumen-arm64.exe > SHA256SUMS.txt
-          cd ..
+          cd dl && sha256sum Lumen-Setup-*.exe Lumen-*-portable-*.zip > SHA256SUMS.txt && cat SHA256SUMS.txt && cd ..
           notes=".github/release-notes/${TAG}.md"
           { if [ -f "$notes" ]; then cat "$notes"; else echo "Lumen ${TAG#v}"; fi
             echo
             echo "### SHA-256 checksums"
             echo '```'
-            cat dist/SHA256SUMS.txt
+            cat dl/SHA256SUMS.txt
             echo '```'
-            echo 'Check yours in PowerShell: `Get-FileHash .\Lumen.exe`'
+            echo 'Check a download in PowerShell: `Get-FileHash .\Lumen-Setup-'"${TAG#v}"'-x64.exe`'
           } > release-notes.md
-
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
           target_commitish: ${{ github.sha }}
@@ -69,6 +161,6 @@ jobs:
           body_path: release-notes.md
           make_latest: true
           files: |
-            dist/Lumen.exe
-            dist/Lumen-arm64.exe
-            dist/SHA256SUMS.txt
+            dl/Lumen-Setup-*.exe
+            dl/Lumen-*-portable-*.zip
+            dl/SHA256SUMS.txt

@@ -2,6 +2,14 @@
 
 All notable changes to Lumen. Downloads for each version are on the [Releases page](../../releases).
 
+## 1.7.0 — plays practically anything
+
+- **Extended engine:** formats Windows' built-in player can't handle now play automatically through a bundled libmpv + FFmpeg engine (LGPL builds, x64 and ARM64): AVI/DivX/Xvid, WMV, MPEG, VOB, TS/M2TS, FLV, HEVC, Dolby Digital, DTS and TrueHD audio, APE, WMA and more, plus Blu-ray and DVD subtitles and full ASS styling. Lumen reads each file's header to pick the engine and says why when it switches.
+- Every feature works on both engines: seek previews, chapters, audio and subtitle tracks, subtitle styling, adjustments, EQ, zoom, rotation, ambient light, statistics, snapshots and thumbnails.
+- Settings → General → *Playback engine*: Automatic, Always extended, or Built-in only.
+- **Installer** (per-user, no admin prompt; Start menu, Open with and Default Apps registration) and **portable zips**, for x64 and ARM64.
+- Dropped files now open with their real paths, so they can use the extended engine and folder features.
+
 ## 1.6.1
 
 - Fixed a brief flash of the old neon start screen before the simple one appeared.

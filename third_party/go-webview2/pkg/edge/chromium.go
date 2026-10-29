@@ -236,8 +236,13 @@ func (e *Chromium) MessageReceived(sender *ICoreWebView2, args *iCoreWebView2Web
 		uintptr(unsafe.Pointer(args)),
 		uintptr(unsafe.Pointer(&message)),
 	)
+	msg := w32.Utf16PtrToString(message)
+	if handleLumenFiles(msg, args) { // Lumen patch: dropped files with real paths
+		windows.CoTaskMemFree(unsafe.Pointer(message))
+		return 0
+	}
 	if e.MessageCallback != nil {
-		e.MessageCallback(w32.Utf16PtrToString(message))
+		e.MessageCallback(msg)
 	}
 	_, _, _ = sender.vtbl.PostWebMessageAsString.Call(
 		uintptr(unsafe.Pointer(sender)),

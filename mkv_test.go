@@ -1,9 +1,9 @@
 package main
 
 import (
-	"fmt"
 	"bytes"
 	"compress/zlib"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"

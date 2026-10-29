@@ -562,3 +562,12 @@ body.min-view .menubar{display:none}
 .about .madeby b{font-weight:600}
 .about .heart{color:#ff4f6d;display:inline-block;animation:heartbeat 1.6s ease-in-out infinite}
 @keyframes heartbeat{0%,40%,100%{transform:scale(1)}20%{transform:scale(1.22)}}
+
+/* =====================================================================
+   v1.7 — extended engine (libmpv). The video is drawn natively under the
+   page, so the page turns transparent wherever the picture shows.
+   ===================================================================== */
+html.mpv-video,html.mpv-video body,html.mpv-video .app,html.mpv-video .stage{background:transparent}
+body.eng-mpv #v{display:none}
+body.eng-mpv .sublayer{display:none}
+body.eng-mpv #amb{clip-path:var(--ambHole,none)}

@@ -2,8 +2,8 @@
 (() => {
 "use strict";
 const $ = id => document.getElementById(id);
-const v = $("v"), stage = $("stage"), app = $("app");
-const VERSION = "1.6.1";
+const vEl = $("v"), stage = $("stage"), app = $("app");
+const VERSION = "1.7.0";
 const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
 
 /* =====================================================================
@@ -52,11 +52,323 @@ function browserDialog(kind){
   });
 }
 
+
+/* =====================================================================
+   Playback engines. Edge WebView2's own <video> plays the common formats;
+   the bundled libmpv engine plays the rest. `v` stands in for the <video>
+   element and forwards to whichever engine is playing, so every feature
+   talks to one object.
+   ===================================================================== */
+let engine = "web";                       // "web" | "mpv"
+const mp = { path: null, time: 0, timeAt: 0, dur: NaN, paused: true, ended: false, seeking: false, loaded: false, meta: false,
+             w: 0, h: 0, tracks: [], aid: null, sid: null, cache: 0, error: null, rate: 1, vol: 1, muted: false, pitch: true, gen: 0 };
+const M = new EventTarget();              // media events synthesised from mpv
+const fire = type => M.dispatchEvent(new Event(type));
+const mpvHost = {
+  ok: null,
+  ready: async () => {
+    if (mpvHost.ok !== null) return mpvHost.ok;
+    try { const r = window.lumenEngine ? await window.lumenEngine() : { ok: false }; mpvHost.ok = !!(r && r.ok); mpvHost.why = r && r.error; }
+    catch { mpvHost.ok = false; }
+    return mpvHost.ok;
+  },
+  probe: p => window.lumenProbe ? window.lumenProbe(p) : Promise.resolve({ engine: "web" }),
+  open: (p, start, paused) => window.lumenMpvOpen(p, start || 0, !!paused),
+  cmd: (...a) => window.lumenMpvCmd(a.map(String)).catch(() => {}),
+  set: (n, val) => window.lumenMpvSet(n, String(val)).catch(() => {}),
+  get: n => window.lumenMpvGet(n),
+  stop: () => window.lumenMpvStop ? window.lumenMpvStop() : Promise.resolve(),
+  rect: (x, y, w, h, show) => window.lumenMpvRect ? window.lumenMpvRect(x, y, w, h, show) : Promise.resolve(),
+  frame: (p, t, w, exact) => window.lumenMpvFrame(p, t, w, !!exact),
+  shot: name => window.lumenMpvShot(name),
+};
+// properties are sent only when they change; rapid changes (pinch zoom) collapse to one per frame
+const mpvSent = {}, mpvQueue = {};
+let mpvFlushQ = 0;
+function mpvProp(name, val){
+  val = String(val);
+  if (mpvSent[name] === val) { delete mpvQueue[name]; return; }
+  mpvQueue[name] = val;
+  if (!mpvFlushQ) mpvFlushQ = requestAnimationFrame(() => { mpvFlushQ = 0; for (const [k, x] of Object.entries(mpvQueue)) { delete mpvQueue[k]; mpvSent[k] = x; mpvHost.set(k, x); } });
+}
+function mpvTime(){
+  if (mp.paused || mp.seeking || !mp.loaded) return mp.time;
+  const t = mp.time + (performance.now() - mp.timeAt) / 1000 * mp.rate;
+  return isFinite(mp.dur) ? Math.min(t, mp.dur) : t;
+}
+function mpvSeek(t){
+  if (!mp.loaded) return;
+  t = Math.max(0, isFinite(mp.dur) ? Math.min(t, mp.dur) : t);
+  mp.time = t; mp.timeAt = performance.now(); mp.ended = false; mp.seeking = true;
+  fire("seeking"); fire("timeupdate");
+  mpvHost.cmd("seek", t.toFixed(3), "absolute");
+}
+const ranges = end => ({ length: end > 0 ? 1 : 0, start: () => 0, end: () => end });
+function mpvAudioTracks(){
+  return mp.tracks.filter(t => t.type === "audio").map(t => ({
+    id: t.id, label: t.title || "", language: t.lang || "",
+    get enabled(){ return String(mp.aid) === String(t.id); },
+    set enabled(on){ if (on) { mp.aid = String(t.id); mpvHost.set("aid", t.id); } },
+  }));
+}
+const listeners = new Map();
+const v = {
+  get currentTime(){ return engine === "mpv" ? mpvTime() : vEl.currentTime; },
+  set currentTime(t){ if (engine === "mpv") mpvSeek(t); else vEl.currentTime = t; },
+  get duration(){ return engine === "mpv" ? mp.dur : vEl.duration; },
+  get paused(){ return engine === "mpv" ? mp.paused : vEl.paused; },
+  get ended(){ return engine === "mpv" ? mp.ended : vEl.ended; },
+  get videoWidth(){ return engine === "mpv" ? mp.w : vEl.videoWidth; },
+  get videoHeight(){ return engine === "mpv" ? mp.h : vEl.videoHeight; },
+  get readyState(){ return engine === "mpv" ? (mp.meta ? 4 : 0) : vEl.readyState; },
+  get buffered(){ return engine === "mpv" ? ranges(mp.cache) : vEl.buffered; },
+  get error(){ return engine === "mpv" ? mp.error : vEl.error; },
+  get volume(){ return vEl.volume; },
+  set volume(x){ vEl.volume = x; mp.vol = x; if (engine === "mpv") mpvVolume(); },
+  get muted(){ return vEl.muted; },
+  set muted(m){ vEl.muted = m; mp.muted = m; if (engine === "mpv") mpvProp("mute", m ? "yes" : "no"); },
+  get playbackRate(){ return engine === "mpv" ? mp.rate : vEl.playbackRate; },
+  set playbackRate(x){ vEl.playbackRate = x; mp.rate = x; mp.time = mpvTime(); mp.timeAt = performance.now(); if (engine === "mpv") mpvProp("speed", x); },
+  get preservesPitch(){ return vEl.preservesPitch; },
+  set preservesPitch(on){ vEl.preservesPitch = on; mp.pitch = on; if (engine === "mpv") mpvProp("audio-pitch-correction", on ? "yes" : "no"); },
+  get audioTracks(){ return engine === "mpv" ? mpvAudioTracks() : vEl.audioTracks; },
+  get style(){ return vEl.style; },
+  get src(){ return engine === "mpv" ? mp.path : vEl.src; },
+  set src(u){ vEl.src = u; },
+  play(){
+    if (engine !== "mpv") return vEl.play();
+    if (mp.ended) { mp.ended = false; mpvSeek(0); }
+    mp.paused = false; mp.timeAt = performance.now(); mpvHost.set("pause", "no"); fire("play"); return Promise.resolve();
+  },
+  pause(){ if (engine !== "mpv") return vEl.pause(); mp.time = mpvTime(); mp.paused = true; mpvHost.set("pause", "yes"); fire("pause"); },
+  load(){ vEl.load(); },
+  getAttribute(a){ return engine === "mpv" && a === "src" ? mp.path : vEl.getAttribute(a); },
+  removeAttribute(a){ vEl.removeAttribute(a); if (a === "src") setEngine("web"); },
+  addTextTrack(k){ return vEl.addTextTrack(k); },
+  getVideoPlaybackQuality(){
+    if (engine !== "mpv") return vEl.getVideoPlaybackQuality();
+    return { totalVideoFrames: mp.frames || 0, droppedVideoFrames: mp.drops || 0, corruptedVideoFrames: 0 };
+  },
+  addEventListener(type, fn, opt){
+    const web = e => { if (engine === "web") fn.call(v, e); }, eng = e => { if (engine === "mpv") fn.call(v, e); };
+    listeners.set(fn, { web, eng, type });
+    vEl.addEventListener(type, web, opt); M.addEventListener(type, eng, opt);
+  },
+  removeEventListener(type, fn){
+    const l = listeners.get(fn); if (!l) return;
+    vEl.removeEventListener(type, l.web); M.removeEventListener(type, l.eng); listeners.delete(fn);
+  },
+};
+function setEngine(e){
+  if (e === engine) return;
+  const was = engine; engine = e;
+  document.body.classList.toggle("eng-mpv", e === "mpv");
+  if (was === "mpv") { mp.path = null; mp.loaded = mp.meta = false; mp.gen++; mpvHost.stop(); mpvPlace(true); }
+  if (e === "mpv") { vEl.removeAttribute("src"); vEl.load(); }
+}
+// Pick the engine for an item: dropped files without a path and the built-in
+// setting always use WebView2; otherwise ask Go which one suits the file.
+async function chooseEngine(it){
+  if (!it.path || !hasHost || settings.engine === "web") return "web";
+  if (!(await mpvHost.ready())) return "web";
+  if (settings.engine === "mpv") { it.why = "extended engine always on"; return "mpv"; }
+  try { const p = await mpvHost.probe(it.path); if (p && p.engine === "mpv") { it.why = p.why; return "mpv"; } } catch {}
+  return "web";
+}
+function mpvOpen(it, autoplay){
+  Object.assign(mp, { path: it.path, time: 0, timeAt: performance.now(), dur: NaN, paused: !autoplay, ended: false, seeking: false,
+                      loaded: false, meta: false, w: 0, h: 0, tracks: [], aid: null, sid: null, cache: 0, error: null, frames: 0, drops: 0 });
+  mp.gen++;
+  for (const k of Object.keys(mpvSent)) delete mpvSent[k];
+  mpvProp("speed", mp.rate); mpvProp("audio-pitch-correction", mp.pitch ? "yes" : "no"); mpvProp("mute", mp.muted ? "yes" : "no");
+  mpvVolume(); mpvAudio(); mpvVideo(); mpvSubStyle(); mpvSlang();
+  mpvHost.open(it.path, 0, !autoplay).then(err => { if (err && mp.path === it.path) mpvFail(it, err); }, err => mpvFail(it, err));
+  fire("loadstart");
+}
+function mpvFail(it, err){
+  mp.error = { code: 4, message: String(err && err.message || err) };
+  fire("error");
+}
+// time/geometry pushed from Go (see mpv.go); also used by the Linux test harness
+const META_WAIT = 400;
+let metaT = 0;
+function mpvMeta(){
+  if (mp.meta || !mp.loaded) return;
+  const hasVideo = mp.tracks.some(t => t.type === "video" && !t.albumart);
+  if (!isFinite(mp.dur) || (hasVideo && !mp.w)) { clearTimeout(metaT); metaT = setTimeout(() => { if (!mp.meta && mp.loaded) { mp.meta = true; fire("durationchange"); fire("loadedmetadata"); fire("loadeddata"); fire("canplay"); } }, META_WAIT); return; }
+  clearTimeout(metaT); mp.meta = true;
+  fire("durationchange"); fire("loadedmetadata"); fire("loadeddata"); fire("canplay");
+  if (!mp.paused) { fire("play"); fire("playing"); }
+}
+window.__mpv = ev => {
+  if (engine !== "mpv" && ev.e !== "shutdown") return;
+  switch (ev.e) {
+    case "start-file": mp.loaded = mp.meta = false; break;
+    case "file-loaded": mp.loaded = true; mp.error = null; mp.timeAt = performance.now(); mpvMeta(); break;
+    case "playback-restart": mp.seeking = false; mp.timeAt = performance.now(); fire("seeked"); fire("timeupdate"); if (!mp.paused) fire("playing"); break;
+    case "end-file":
+      if (ev.reason === "error") { mp.error = { code: 4, message: ev.error || "can't play this file" }; fire("error"); }
+      break;
+    case "log": if (ev.level === "error" || ev.level === "fatal") console.warn("[mpv]", ev.prefix, ev.text); break;
+    case "shutdown": mpvHost.ok = false; if (engine === "mpv") { mp.error = { code: 4, message: "the playback engine stopped" }; fire("error"); } break;
+    case "prop": mpvPropChanged(ev.n, ev.v); break;
+  }
+};
+function mpvPropChanged(n, x){
+  switch (n) {
+    case "time-pos": if (x != null) { mp.time = x; mp.timeAt = performance.now(); fire("timeupdate"); } break;
+    case "duration": mp.dur = x == null ? NaN : x; if (mp.meta) fire("durationchange"); else mpvMeta(); break;
+    case "pause":
+      if (x === mp.paused) break;
+      mp.time = mpvTime(); mp.paused = !!x; mp.timeAt = performance.now();
+      fire(x ? "pause" : "play"); if (!x && mp.meta) fire("playing"); break;
+    case "eof-reached":
+      if (x && mp.loaded && !mp.ended) { mp.ended = true; mp.paused = true; mp.time = isFinite(mp.dur) ? mp.dur : mp.time; fire("timeupdate"); fire("pause"); fire("ended"); }
+      if (!x) mp.ended = false;
+      break;
+    case "seeking": if (x) { mp.seeking = true; } break;
+    case "video-params/dw": mp.w = x || 0; if (mp.meta) { fire("resize"); layout(); } else mpvMeta(); break;
+    case "video-params/dh": mp.h = x || 0; if (mp.meta) { fire("resize"); layout(); } else mpvMeta(); break;
+    case "track-list": mp.tracks = Array.isArray(x) ? x : []; mpvTracksChanged(); mpvMeta(); break;
+    case "chapter-list": setChapters((x || []).map(c => ({ start: c.time, title: c.title || "" }))); break;
+    case "demuxer-cache-time": mp.cache = x || 0; break;
+    case "aid": mp.aid = x; break;
+    case "sid": mp.sid = x; break;
+  }
+}
+function mpvTracksChanged(){
+  const it = list[idx]; if (!it) return;
+  const isVideo = mp.tracks.some(t => t.type === "video" && !t.albumart);
+  if (it.kind === "video" && mp.loaded && !isVideo && mp.tracks.length) { it.kind = "audio"; stage.classList.add("is-audio"); renderList(); }
+  // subtitles: Lumen's list mirrors mpv's sub tracks; mpv draws them (text and image subtitles)
+  const cur = subs[activeSub]?.mpvId;
+  const prevCount = subs.length;
+  subs = mp.tracks.filter(t => t.type === "sub").map((t, n) => ({
+    label: t.external ? (t.title || (t["external-filename"] || "").split(/[\\/]/).pop() || "Subtitle file") + " (file)" : trackLabel(t.title, t.lang, n, t.forced),
+    lang: t.lang || "", source: t.external ? "sidecar" : "embedded", isDefault: !!t.default, forced: !!t.forced, mpvId: t.id,
+    image: /pgs|dvd_sub|dvb_sub|vobsub/i.test(t.codec || ""), cues: [],
+  }));
+  activeSub = cur != null ? subs.findIndex(s => s.mpvId === cur) : -1;
+  $("bCC").classList.toggle("on", activeSub >= 0);
+  if (subs.length !== prevCount) autoPick();
+  if (subs.length > prevCount && mp.meta) refreshAudioTracks();
+}
+function mpvSlang(){
+  const l = settings.subLang !== "auto" ? settings.subLang : "";
+  mpvProp("slang", l || "");
+}
+function mpvVolume(){
+  const boost = settings.eq.boost / 100;
+  mpvProp("volume", Math.round(clamp(mp.vol * 100 * boost, 0, 250) * 10) / 10);
+}
+// Audio effects as FFmpeg filters (EQ, balance/mono, normalisation); boost is mpv's volume.
+function mpvAudio(){
+  const e = settings.eq, f = [];
+  if (e.on && e.gains.some(g => g)) e.gains.forEach((g, i) => {
+    if (!g) return;
+    const fq = EQ_FREQS[i];
+    f.push(i === 0 ? `bass=f=${fq}:g=${g}` : i === EQ_FREQS.length - 1 ? `treble=f=${fq}:g=${g}` : `equalizer=f=${fq}:t=q:w=1.1:g=${g}`);
+  });
+  if (e.mono || e.balance) {
+    const b = e.balance / 100, lg = b > 0 ? 1 - b : 1, rg = b < 0 ? 1 + b : 1;
+    const L = e.mono ? "0.5*c0+0.5*c1" : "c0", R = e.mono ? "0.5*c0+0.5*c1" : "c1";
+    f.push(`pan=stereo|c0=${lg.toFixed(3)}*(${L})|c1=${rg.toFixed(3)}*(${R})`.replace(/\*\((c\d)\)/g, "*$1"));
+  }
+  if (e.normalize) f.push("dynaudnorm=f=250:g=15:p=0.9");
+  mpvProp("af", f.length ? `@lumen:lavfi=[${f.join(",")}]` : "");
+  mpvVolume();
+}
+// Colour adjustments: mpv's own controls, plus FFmpeg filters for sepia and mirroring.
+function mpvVideo(){
+  const f = settings.video;
+  mpvProp("brightness", clamp(Math.round((f.brightness - 100) * .8), -100, 100));
+  mpvProp("contrast", clamp(Math.round(f.contrast - 100), -100, 100));
+  mpvProp("saturation", clamp(Math.round(f.saturation - 100), -100, 100));
+  mpvProp("hue", clamp(Math.round((f.hue || 0) / 1.8), -100, 100));
+  const vf = [];
+  if (f.sepia) {
+    const a = f.sepia / 100, k = 1 - a, n = x => x.toFixed(4);
+    vf.push(`colorchannelmixer=rr=${n(.393 + .607 * k)}:rg=${n(.769 - .769 * k)}:rb=${n(.189 - .189 * k)}:gr=${n(.349 - .349 * k)}:gg=${n(.686 + .314 * k)}:gb=${n(.168 - .168 * k)}:br=${n(.272 - .272 * k)}:bg=${n(.534 - .534 * k)}:bb=${n(.131 + .869 * k)}`);
+  }
+  if (geo.flip) vf.push("hflip");
+  mpvProp("vf", vf.length ? `@lumen:lavfi=[${vf.join(",")}]` : "");
+}
+// Geometry: mpv draws inside the stage; Lumen's zoom, pan, rotation and aspect map onto mpv's.
+function mpvGeo(bw, bh){
+  const rot = ((geo.rotate % 360) + 360) % 360;
+  mpvProp("video-rotate", rot);
+  mpvProp("video-aspect-override", /^\d+:\d+$/.test(geo.aspect) ? geo.aspect : "no");
+  mpvProp("panscan", geo.aspect === "fill" ? "1.0" : "0.0");
+  mpvProp("keepaspect", geo.aspect === "stretch" ? "no" : "yes");
+  mpvProp("video-zoom", Math.log2(Math.max(geo.zoom, 1) / 100).toFixed(4));
+  mpvProp("video-pan-x", bw ? (geo.panX / bw).toFixed(4) : 0);
+  mpvProp("video-pan-y", bh ? (geo.panY / bh).toFixed(4) : 0);
+}
+// The native video window covers the stage and sits under the interface.
+let lastRect = "";
+function mpvPlace(force){
+  const show = engine === "mpv" && list[idx]?.kind === "video";
+  document.documentElement.classList.toggle("mpv-video", show);    // page turns transparent over the native video
+  if (!hasHost) return;
+  const r = stage.getBoundingClientRect();
+  const key = show ? `${r.left}|${r.top}|${r.width}|${r.height}` : "hidden";
+  if (key === lastRect && !force) return;
+  lastRect = key;
+  mpvHost.rect(r.left, r.top, r.width, r.height, show);
+}
+new ResizeObserver(() => mpvPlace()).observe(stage);
+window.addEventListener("resize", () => mpvPlace());
+if (hasHost) setTimeout(() => mpvHost.ready(), 300);       // learn early whether the engine is installed
+// Subtitle look in mpv: Lumen's style settings in mpv's units (font size is relative to 720 lines).
+function mpvSubStyle(){
+  const st = settings.sub;
+  const controls = !stage.classList.contains("idle") && !stage.classList.contains("no-media") && st.lift;
+  const H = Math.max(1, pic ? pic.h : stage.clientHeight), unit = 720 / H;
+  let margin = st.margin / 100 * 720;
+  if (controls) {
+    const ctrlGap = st.position === "top" ? $("top").offsetHeight : $("ctrl").offsetHeight + 6;
+    const edge = st.position === "top" ? (pic ? pic.y : 0) : (pic ? stage.clientHeight - pic.y - pic.h : 0);
+    margin = Math.max(margin, (ctrlGap - edge) * unit);
+  }
+  mpvProp("sub-font", (FONTS[st.font] || FONTS.sans)[1].split(",")[0].replace(/"/g, "").trim());
+  mpvProp("sub-font-size", Math.round(.047 * 720 * st.size / 100));
+  mpvProp("sub-bold", st.bold ? "yes" : "no");
+  mpvProp("sub-color", st.color);
+  mpvProp("sub-border-size", st.outline ? (st.outline * 1.4).toFixed(1) : 0);
+  mpvProp("sub-border-color", st.outlineColor);
+  mpvProp("sub-shadow-offset", st.shadow ? 2 : 0);
+  mpvProp("sub-back-color", st.bg ? "#" + Math.round(st.bg / 100 * 255).toString(16).padStart(2, "0") + st.bgColor.slice(1) : "#00000000");
+  mpvProp("sub-border-style", st.bg ? "background-box" : "outline-and-shadow");
+  mpvProp("sub-align-y", st.position === "top" ? "top" : "bottom");
+  mpvProp("sub-margin-y", Math.round(clamp(margin, 0, 600)));
+  mpvProp("sub-use-margins", "no");
+  mpvProp("sub-delay", subDelay);
+}
+// Frames for previews, thumbnails, ambient light and the minimap come from a second, hidden decoder.
+async function mpvFrameImage(t, w, exact){
+  const it = list[idx]; if (!it || !it.path) throw new Error("no file");
+  const url = await mpvHost.frame(it.path, t, w, exact);
+  return await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = url; });
+}
+let ambBusy = false, ambLast = 0;
+async function mpvAmbient(force){
+  if (engine !== "mpv" || ambBusy || (!force && performance.now() - ambLast < 1400)) return;
+  const showAmb = stage.classList.contains("ambient"), showMm = zoomed();
+  if (!showAmb && !showMm) return;
+  ambBusy = true; ambLast = performance.now();
+  try {
+    const im = await mpvFrameImage(v.currentTime, showMm ? 160 : 48, false);
+    if (showAmb) $("amb").getContext("2d").drawImage(im, 0, 0, 32, 18);
+    if (showMm) { const c = $("mmCanvas"); c.getContext("2d").drawImage(im, 0, 0, c.width, c.height); }
+  } catch {}
+  ambBusy = false;
+}
+
 /* =====================================================================
    Helpers
    ===================================================================== */
-const AUDIO = /\.(mp3|m4a|aac|flac|wav|ogg|oga|opus|weba|wma|mka)$/i;
-const VIDEO = /\.(mp4|m4v|webm|mkv|mov|ogv|avi|wmv|3gp|ts|m2ts)$/i;
+const AUDIO = /\.(mp3|m4a|aac|flac|wav|ogg|oga|opus|weba|wma|mka|ac3|eac3|dts|dtshd|thd|mlp|ape|wv|tak|tta|mpc|aiff?|aifc|au|snd|amr|awb|caf|dsf|dff|spx|ra|mod|xm|s3m|it|mp2|mpa|m2a|voc|w64|rf64)$/i;
+const VIDEO = /\.(mp4|m4v|webm|mkv|mov|ogv|avi|divx|xvid|wmv|asf|wtv|dvr-ms|flv|f4v|mpe?g|mpe|m1v|m2v|vob|ts|m2ts|mts|tp|trp|3gp|3g2|rm|rmvb|ogm|dv|y4m|mxf|nut|amv|ivf|h264|264|h265|hevc)$/i;
 const SUBS  = /\.(srt|vtt|ass|ssa)$/i;
 const MATROSKA = /\.(mkv|mka|webm)$/i;
 const kindOf = n => AUDIO.test(n) ? "audio" : VIDEO.test(n) ? "video" : SUBS.test(n) ? "sub" : null;
@@ -150,7 +462,7 @@ const SUB_LANGS = [["auto","Track marked as default"],["en","English"],["es","Sp
 const DEFAULTS = {
   v: 3,
   rememberVolume: true, resume: false, autoNext: true, defaultSpeed: 1, preservePitch: true,
-  speedStepMode: "preset", afterPlayback: "nothing", keepRecent: false, minimalView: false,
+  speedStepMode: "preset", afterPlayback: "nothing", keepRecent: false, minimalView: false, engine: "auto",
   lockAspect: true, fitOnOpen: false, singleInstance: true, explorerOpen: "play",
   theme: "dark", accent: "amber", accentCustom: "#ffb547", showTitle: true,
   glow: "off", landingFx: "full", landingStyle: "simple", neonColors: "accent", uiFont: "segoe", gpuFx: true, fxQuality: "auto",
@@ -338,19 +650,32 @@ function play(i, autoplay = true){
   clearSubs(); clearAB(); setChapters([]);
   if (settings.keepRecent && it.path) { saved.recent = [it.path, ...saved.recent.filter(p => p !== it.path)].slice(0, 15); persist(); }
   geo = freshGeo();
-  v.src = it.url; v.playbackRate = S.speed; v.preservesPitch = settings.preservePitch;
   $("empty").classList.add("hidden"); stage.classList.remove("no-media");
   stage.classList.toggle("is-audio", it.kind === "audio");
   $("title").textContent = base(it.name); $("aTitle").textContent = base(it.name);
   $("aSub").textContent = it.path ? it.path.replace(/[\\/][^\\/]+$/, "") : "";
   host.title(base(it.name) + " — Lumen");
   pv.removeAttribute("src"); pvFor = null; pvShown = -1;          // seek previews load lazily, on first hover
-  if (autoplay) v.play().catch(() => {});
-  markCurrent(); applyAppearance(); layout(); wake();
-  if (it.kind === "video") findSubtitles(it, token);
-  loadChapters(it, token);
-  if (it.kind === "audio" || needsAudioGraph()) audioGraph();
+  markCurrent(); applyAppearance(); wake();
+  startMedia(it, token, autoplay);
   if (adjOpen()) renderAdj();
+}
+async function startMedia(it, token, autoplay){
+  const use = await chooseEngine(it);
+  if (token !== loadToken) return;
+  setEngine(use);
+  v.playbackRate = S.speed; v.preservesPitch = settings.preservePitch;
+  if (use === "mpv") {
+    mpvOpen(it, autoplay);
+    if (it.why && !it.toldWhy) { it.toldWhy = true; toast(`Extended engine · ${it.why}`); }
+  } else {
+    vEl.src = it.url;
+    if (autoplay) vEl.play().catch(() => {});
+    if (it.kind === "video") findSubtitles(it, token);
+    loadChapters(it, token);
+    if (it.kind === "audio" || needsAudioGraph()) audioGraph();
+  }
+  layout(); mpvPlace(true);
 }
 function toggle(){
   if (idx < 0) return list.length ? play(0) : openFiles();
@@ -444,6 +769,9 @@ v.addEventListener("ended", () => {
 });
 v.addEventListener("error", () => {
   const it = list[idx]; if (!it || !v.getAttribute("src")) return;
+  if (engine === "mpv" && !it.webTried && /\.(mp4|m4v|webm|mkv|mov|mp3|m4a|flac|wav|ogg|opus)$/i.test(it.name)) {   // engine failed: try WebView2
+    it.webTried = true; setEngine("web"); vEl.src = it.url; vEl.play().catch(() => {}); return;
+  }
   const code = v.error && v.error.code;
   toast(code === 4 ? `Can't play "${it.name}" — this format or codec isn't supported` : `Couldn't open "${it.name}"`, true);
   it.bad = true;
@@ -468,7 +796,7 @@ function layout(){
   if (!W || !H) return;
   if (!vw || !vh || list[idx]?.kind !== "video") {
     v.style.cssText = ""; applyVideoFilter(); pic = { x: 0, y: 0, w: W, h: H }; box = null;
-    stage.classList.remove("zoomed"); placeSubs(); aspectLock(); return;
+    stage.classList.remove("zoomed"); placeSubs(); aspectLock(); mpvPlace(); return;
   }
   const sa = screenAspect(), rot = ((geo.rotate % 360) + 360) % 360, side = rot === 90 || rot === 270;
   let bw, bh;
@@ -480,12 +808,17 @@ function layout(){
   geo.panX = clamp(geo.panX, -mx, mx); geo.panY = clamp(geo.panY, -my, my);
   const cx = W / 2 + geo.panX, cy = H / 2 + geo.panY;
   const ew = side ? bh : bw, eh = side ? bw : bh;
-  Object.assign(v.style, { inset: "auto", left: cx - ew / 2 + "px", top: cy - eh / 2 + "px", width: ew + "px", height: eh + "px",
+  if (engine === "mpv") { v.style.cssText = ""; mpvGeo(bw, bh); mpvPlace(); }
+  else Object.assign(v.style, { inset: "auto", left: cx - ew / 2 + "px", top: cy - eh / 2 + "px", width: ew + "px", height: eh + "px",
     objectFit: "fill", transform: `rotate(${rot}deg) scaleX(${geo.flip ? -1 : 1})` });
   box = { x: cx - bw / 2, y: cy - bh / 2, w: bw, h: bh };
   const x0 = Math.max(0, box.x), y0 = Math.max(0, box.y);
   pic = { x: x0, y: y0, w: Math.min(W, box.x + bw) - x0, h: Math.min(H, box.y + bh) - y0 };
   stage.classList.toggle("zoomed", geo.zoom > 100.5);
+  if (engine === "mpv") {   // ambient glow only around the picture: the native video is underneath the page
+    const ax = -.15 * W, ay = -.15 * H, x1 = pic.x - ax, y1 = pic.y - ay, x2 = x1 + pic.w, y2 = y1 + pic.h;
+    stage.style.setProperty("--ambHole", `polygon(evenodd,0 0,100% 0,100% 100%,0 100%,0 0,${x1}px ${y1}px,${x2}px ${y1}px,${x2}px ${y2}px,${x1}px ${y2}px,${x1}px ${y1}px)`);
+  }
   drawHud(); placeSubs(); aspectLock();
 }
 new ResizeObserver(() => { layout(); closeMenus(); }).observe(stage);
@@ -557,7 +890,7 @@ function drawHud(){
   Object.assign(vw.style, { left: l * 100 + "%", top: t * 100 + "%", width: Math.min(1 - l, W / box.w) * 100 + "%", height: Math.min(1 - t, H / box.h) * 100 + "%" });
   $("zoomReset").textContent = Math.round(geo.zoom) + "%";
   const now = Date.now();
-  if (now - mmT > 400) { mmT = now; try { const c = $("mmCanvas"); c.getContext("2d").drawImage(v, 0, 0, c.width, c.height); } catch {} }
+  if (now - mmT > 400) { mmT = now; if (engine === "mpv") mpvAmbient(); else try { const c = $("mmCanvas"); c.getContext("2d").drawImage(vEl, 0, 0, c.width, c.height); } catch {} }
 }
 function mmPan(e){
   const r = $("mm").getBoundingClientRect();
@@ -594,7 +927,8 @@ function applyVideoFilter(){
   if (f.saturation !== 100) parts.push(`saturate(${f.saturation}%)`);
   if (f.hue) parts.push(`hue-rotate(${f.hue}deg)`);
   if (f.sepia) parts.push(`sepia(${f.sepia}%)`);
-  v.style.filter = parts.join(" ");
+  v.style.filter = engine === "mpv" ? "" : parts.join(" ");
+  if (engine === "mpv") mpvVideo();
   return parts.join(" ") || "none";
 }
 
@@ -607,7 +941,7 @@ function audioGraph(){
   if (AG) return AG;
   try {
     const ctx = new AudioContext();
-    const src = ctx.createMediaElementSource(v);
+    const src = ctx.createMediaElementSource(vEl);
     const mono = ctx.createGain();
     const bands = EQ_FREQS.map((f, i) => { const b = ctx.createBiquadFilter(); b.type = i === 0 ? "lowshelf" : i === EQ_FREQS.length - 1 ? "highshelf" : "peaking"; b.frequency.value = f; b.Q.value = 1.1; return b; });
     const boost = ctx.createGain(), pan = ctx.createStereoPanner(), an = ctx.createAnalyser();
@@ -621,6 +955,7 @@ function audioGraph(){
   return AG;
 }
 function applyAudio(){
+  if (engine === "mpv") return mpvAudio();
   if (!AG) { if (needsAudioGraph() && idx >= 0) audioGraph(); return; }
   const e = settings.eq, t = AG.ctx.currentTime;
   AG.bands.forEach((b, i) => b.gain.setTargetAtTime(e.on ? e.gains[i] : 0, t, .03));
@@ -633,7 +968,7 @@ function applyAudio(){
   AG.makeup.gain.setTargetAtTime(e.normalize ? 1.7 : 1, t, .05);
 }
 let vizRunning = false;
-function ensureViz(){ if (!vizRunning && stage.classList.contains("is-audio") && audioGraph()) { vizRunning = true; requestAnimationFrame(drawViz); } }
+function ensureViz(){ if (engine !== "mpv" && !vizRunning && stage.classList.contains("is-audio") && audioGraph()) { vizRunning = true; requestAnimationFrame(drawViz); } }
 function drawViz(){
   const c = $("viz");
   if (!stage.classList.contains("is-audio") || !AG || v.paused || document.hidden) { vizRunning = false; return; }   // idle when nothing moves
@@ -683,11 +1018,12 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden && !v
 let ambT = 0;
 function drawAmbient(){
   if (!stage.classList.contains("ambient") || !v.videoWidth) return;
-  try { $("amb").getContext("2d").drawImage(v, 0, 0, 32, 18); } catch {}
+  if (engine === "mpv") return mpvAmbient(true);
+  try { $("amb").getContext("2d").drawImage(vEl, 0, 0, 32, 18); } catch {}
 }
 function ambientLoop(){
   clearInterval(ambT);
-  if (stage.classList.contains("ambient")) { drawAmbient(); ambT = setInterval(() => { if (!v.paused && !document.hidden) drawAmbient(); }, 120); }
+  if (stage.classList.contains("ambient")) { drawAmbient(); ambT = setInterval(() => { if (!v.paused && !document.hidden) { if (engine === "mpv") mpvAmbient(); else drawAmbient(); } }, 120); }
 }
 
 /* =====================================================================
@@ -698,6 +1034,7 @@ const pv = document.createElement("video"); pv.muted = true; pv.preload = "auto"
 let pvBusy = false, pvNext = null, pvShown = -1, pvFor = null;
 function thumbAt(t){
   if (!settings.seekPreview || list[idx]?.kind !== "video") return $("tip").classList.remove("thumb");
+  if (engine === "mpv") return mpvThumbAt(t);
   if (pvFor !== list[idx]) { pvFor = list[idx]; pv.src = list[idx].url; pvBusy = false; }   // first hover: start the preview stream
   t = Math.round(t);
   if (t === pvShown) return;
@@ -711,6 +1048,16 @@ function thumbAt(t){
   pv.addEventListener("seeked", done);
   try { pv.currentTime = t; } catch { pvBusy = false; }
   setTimeout(() => { if (pvBusy) { pv.removeEventListener("seeked", done); pvBusy = false; } }, 1500);
+}
+let mpvPvBusy = false, mpvPvNext = null;
+async function mpvThumbAt(t){
+  t = Math.round(t);
+  if (t === pvShown) return;
+  if (mpvPvBusy) { mpvPvNext = t; return; }
+  mpvPvBusy = true; mpvPvNext = null;
+  try { const im = await mpvFrameImage(t, 192, true); const c = $("thumb"); c.getContext("2d").drawImage(im, 0, 0, c.width, c.height); $("tip").classList.add("thumb"); pvShown = t; } catch {}
+  mpvPvBusy = false;
+  if (mpvPvNext !== null && mpvPvNext !== t) mpvThumbAt(mpvPvNext);
 }
 function seekPos(e){ const r = seek.getBoundingClientRect(); return clamp((e.clientX - r.left) / r.width, 0, 1); }
 seek.addEventListener("pointermove", e => {
@@ -911,12 +1258,13 @@ function addCue(s, start, end, text){
   try { const c = new VTTCue(start + subDelay, end + subDelay, text); s.slot.tt.addCue(c); s.cues.push({ start, end, c }); } catch {}
 }
 function clearSubs(){
-  for (const s of subs) { for (const x of s.cues) try { s.slot.tt.removeCue(x.c); } catch {} s.slot.tt.mode = "disabled"; s.slot.free = true; }
+  for (const s of subs) { if (!s.slot) continue; for (const x of s.cues) try { s.slot.tt.removeCue(x.c); } catch {} s.slot.tt.mode = "disabled"; s.slot.free = true; }
   subs = []; activeSub = -1; userPickedSub = false; subDelay = 0; $("bCC").classList.remove("on"); renderSubs();
 }
 function setSub(i, how){
   activeSub = i;
   $("bCC").classList.toggle("on", i >= 0);
+  if (engine === "mpv") { const id = subs[i]?.mpvId; mp.sid = id ?? "no"; mpvHost.set("sid", id ?? "no"); }
   if (how === "user") { userPickedSub = true; toast(i >= 0 ? `Subtitles: ${subs[i].label}` : "Subtitles off"); }
   renderSubs();
 }
@@ -938,6 +1286,7 @@ function autoPick(){
 function shiftSubs(d){
   if (!subs.length) return toast("No subtitles loaded");
   subDelay = Math.round((subDelay + d) * 10) / 10;
+  if (engine === "mpv") mpvProp("sub-delay", subDelay);
   for (const s of subs) for (const x of s.cues) { x.c.startTime = x.start + subDelay; x.c.endTime = x.end + subDelay; }
   toast(`Subtitle delay ${subDelay > 0 ? "+" : ""}${subDelay.toFixed(1)} s`);
 }
@@ -969,7 +1318,7 @@ function subFontPx(h){ return clamp(h * .047 * settings.sub.size / 100, 12, 140)
 function renderSubs(){
   const layer = $("subLayer"); layer.innerHTML = "";
   const s = subs[activeSub];
-  if (s && list[idx]?.kind === "video") {
+  if (s && s.slot && list[idx]?.kind === "video") {
     const cues = [...(s.slot.tt.activeCues || [])].sort((a, b) => a.startTime - b.startTime);
     for (const c of cues) {
       const d = document.createElement("div"); d.className = "cue";
@@ -981,6 +1330,7 @@ function renderSubs(){
   placeSubs();
 }
 function placeSubs(){
+  if (engine === "mpv") return mpvSubStyle();          // mpv draws the subtitles; send it Lumen's style
   const layer = $("subLayer"); if (!pic) return;
   const st = settings.sub, H = stage.clientHeight, px = subFontPx(pic.h);
   styleCues(layer, px);
@@ -1047,6 +1397,13 @@ function trackLabel(name, lang, n, forced){
 
 /* ---- loading ---- */
 async function loadSubFile(it, select){
+  if (engine === "mpv") {                               // the engine reads subtitle files itself
+    if (!it.path) return toast("Subtitles for this file need to be opened with Load subtitle file", true);
+    userPickedSub = !!select;
+    try { await window.lumenMpvCmd(["sub-add", it.path, select ? "select" : "auto"]); if (select) toast(`Subtitles: ${base(it.name)}`); }
+    catch { toast(`Couldn't read subtitle "${it.name}"`, true); }
+    return;
+  }
   const token = loadToken;
   try {
     const txt = it.file ? await it.file.text() : await (await fetch(it.url)).text();
@@ -1150,15 +1507,33 @@ window.addEventListener("dragover", e => { if (isExternal(e)) { e.preventDefault
 window.addEventListener("drop", async e => {
   if (!isExternal(e)) return;
   e.preventDefault(); dragDepth = 0; document.body.classList.remove("dragging");
-  const files = await collectDropped(e.dataTransfer);
+  const dt = e.dataTransfer, dropped = [...dt.files];
+  const entries = [...dt.items].map(i => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
+  if (!(dropped.length === 1 && /\.json$/i.test(dropped[0].name))) {
+    const byPath = await droppedPaths(dropped);
+    if (byPath && byPath.length) return add(byPath, idx < 0);
+  }
+  const files = await collectDropped(dt, entries);
   files.sort((a, b) => natural(a.name, b.name));
   if (files.length === 1 && /\.json$/i.test(files[0].name)) return importSettingsText(await files[0].text());
   const items = filesToItems(files);
   if (!items.length) return toast("No playable files in that drop", true);
   add(items, idx < 0);
 });
-async function collectDropped(dt){
-  const entries = [...dt.items].map(i => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
+// WebView2 tells Go where dropped files live, so they open like files from the Open dialog.
+const dropWaiters = {};
+window.__lumenDropped = (tag, items) => { const w = dropWaiters[tag]; delete dropWaiters[tag]; w && w(items); };
+function droppedPaths(files){
+  const wv = window.chrome && window.chrome.webview;
+  if (!hasHost || !files.length || !wv || typeof wv.postMessageWithAdditionalObjects !== "function") return Promise.resolve(null);
+  const tag = Math.random().toString(36).slice(2);
+  return new Promise(res => {
+    dropWaiters[tag] = res;
+    setTimeout(() => { if (dropWaiters[tag]) { delete dropWaiters[tag]; res(null); } }, 2500);
+    try { wv.postMessageWithAdditionalObjects("lumen-files:" + tag, files); } catch { delete dropWaiters[tag]; res(null); }
+  });
+}
+async function collectDropped(dt, entries){
   if (!entries.length) return [...dt.files];
   const out = [];
   const walk = async (en, depth) => {
@@ -1178,12 +1553,17 @@ async function collectDropped(dt){
 async function snapshot(){
   const it = list[idx];
   if (!it || it.kind !== "video" || !v.videoWidth) return toast("Snapshots need a video to be playing", true);
+  if (engine === "mpv") {
+    try { const p = await mpvHost.shot(`${base(it.name)} ${fmt(v.currentTime).replace(/:/g, "-")}`); flash("plus"); toast(`Snapshot saved: ${p}`); }
+    catch { toast("Couldn't save the snapshot", true); }
+    return;
+  }
   const rot = ((geo.rotate % 360) + 360) % 360, side = rot === 90 || rot === 270;
   const c = document.createElement("canvas"); c.width = side ? v.videoHeight : v.videoWidth; c.height = side ? v.videoWidth : v.videoHeight;
   const g = c.getContext("2d");
   g.filter = applyVideoFilter();                 // snapshots include your colour adjustments
   g.translate(c.width / 2, c.height / 2); g.rotate(rot * Math.PI / 180); if (geo.flip) g.scale(-1, 1);
-  g.drawImage(v, -v.videoWidth / 2, -v.videoHeight / 2);
+  g.drawImage(vEl, -v.videoWidth / 2, -v.videoHeight / 2);
   const name = `${base(it.name)} ${fmt(v.currentTime).replace(/:/g, "-")}`;
   try { const p = await host.snapshot(c.toDataURL("image/png"), name); flash("plus"); toast(`Snapshot saved: ${p}`); }
   catch { toast("Couldn't save the snapshot", true); }
@@ -1200,6 +1580,7 @@ function mediaInfo(){
   if (it.kind === "video") rows.push(["Resolution", v.videoWidth ? `${v.videoWidth} × ${v.videoHeight}` : "—"]);
   rows.push(["Subtitles", subs.length ? subs.map((s, i) => (i === activeSub ? "● " : "") + s.label).join(", ") : "None"]);
   rows.push(["Playback", `${speedLabel(S.speed)} speed · position ${fmt(v.currentTime)}`]);
+  rows.push(["Engine", engine === "mpv" ? `Extended engine (libmpv)${it.why ? ` — ${it.why}` : ""}` : "Windows built-in (Edge WebView2)"]);
   const fx = [];
   if (applyVideoFilter() !== "none") fx.push("colour adjusted");
   if (geo.aspect !== "auto" || geo.zoom !== 100 || geo.rotate % 360 || geo.flip) fx.push("geometry changed");
@@ -1440,6 +1821,7 @@ const SETTINGS_UI = {
     ["seekStep", "seg", "Arrow-key seek step", "How far ← and → jump", [[3,"3 s"],[5,"5 s"],[10,"10 s"],[30,"30 s"]]],
     ["skipStep", "seg", "Skip buttons", "Jump size of the ⟲ ⟳ buttons and J / L", [[5,"5 s"],[10,"10 s"],[15,"15 s"],[30,"30 s"]]],
     ["speedStepMode", "seg", "Speed step", "How [ and ] change the speed", [["preset","Presets"],[.05,"±0.05"],[.1,"±0.1"],[.25,"±0.25"]]],
+    ["engine", "seg", "Playback engine", engineNote(), [["auto","Automatic"],["mpv","Always extended"],["web","Built-in only"]]],
     ["afterPlayback", "select", "After playback", "What happens when the playlist ends (Playback → After playback can override it once)", [["nothing","Do nothing"],["nextInFolder","Play the next file in the folder"],["close","Close the file"],["exit","Exit Lumen"]]],
     ["History"],
     ["keepRecent", "toggle", "Keep a list of recent files", "Off keeps Lumen history-free. Lumen still never reopens a file by itself."],
@@ -1511,6 +1893,11 @@ const SETTINGS_UI = {
 };
 const BUTTONS = [["prevnext","Previous / next"],["skip","Skip back / forward"],["volume","Volume"],["time","Time"],["shuffle","Shuffle"],["repeat","Repeat"],["cc","Subtitles"],["speed","Speed"],["pin","Keep on top"],["adjust","Adjustments"]];
 let settingsTab = "general";
+function engineNote(){
+  if (!hasHost) return "Available in the Windows app";
+  if (mpvHost.ok === false) return "Extended engine not installed — Built-in (Edge WebView2) only" + (mpvHost.why ? "" : "");
+  return "Automatic uses Windows' built-in player for common files and the extended engine (libmpv) for everything else";
+}
 function settingsModal(tab){
   if (tab) settingsTab = tab;
   openModal("Settings", `<nav class="stabs">${TABS.map(([k, l, ic]) => `<button data-tab="${k}"><svg><use href="#i-${ic}"/></svg>${l}</button>`).join("")}</nav><div class="spane scroll" id="spane"></div>`,
@@ -1548,6 +1935,7 @@ function changeSetting(k, val){
   if (k === "subsAuto" || k === "subLang") { userPickedSub = false; autoPick(); }
   if (k === "resume" && !val) saved.positions = {};
   if (k === "keepRecent" && !val) saved.recent = [];
+  if (k === "engine" && idx >= 0 && list[idx].path) { pendingSeek = v.currentTime; const wasPaused = v.paused; play(idx, !wasPaused); }
   if (k === "defaultSpeed") setSpeed(val, true);
   if (k === "gestures.maxZoom" && geo.zoom > val) zoomAt(val, null, null, true);
   if (k === "lockAspect") { lastAsp = ""; aspectLock(); }
@@ -1644,7 +2032,7 @@ const aboutModal = () => openModal("About Lumen", `<div class="about"><div class
   <p>Version ${VERSION}</p><p>A lightweight, very customizable media player for Windows.</p>
   <p class="madeby">Made with <span class="heart" aria-label="love">♥</span> by <b>Shane Sahadeo</b></p>
   <p style="font-size:12.5px;color:var(--faint)">Publisher: Shane Sahadeo · © 2026</p>
-  <p style="font-size:12.5px;color:var(--faint)">Built with Go and the open-source go-webview2 bindings (MIT),<br>playing media through Microsoft Edge WebView2.</p></div>`);
+  <p style="font-size:12.5px;color:var(--faint)">Built with Go and the open-source go-webview2 bindings (MIT).<br>Plays media through Microsoft Edge WebView2 and, for everything else,<br>the extended engine: libmpv and FFmpeg (LGPL)${mpvHost.ok ? "" : " — not installed"}.</p></div>`);
 
 /* =====================================================================
    Menu bar
@@ -2012,7 +2400,19 @@ function toggleStats(force){
   $("statsBox").hidden = !statsOn; clearInterval(statsT); statsPrev = null;
   if (statsOn) { renderStats(); statsT = setInterval(renderStats, 500); }
 }
+const mpvStats = {};
+async function mpvStatsRefresh(){
+  if (engine !== "mpv") return;
+  const g = async n => { try { return await mpvHost.get(n); } catch { return ""; } };
+  const hw = await g("hwdec-current");
+  mpvStats.hw = hw && hw !== "no" ? `hardware decoding (${hw})` : "software decoding";
+  mpvStats.vc = (await g("video-format")).toUpperCase(); mpvStats.ac = (await g("audio-codec-name")).toUpperCase();
+  mp.drops = +(await g("frame-drop-count")) || 0;
+  const fps = parseFloat(await g("estimated-vf-fps")) || parseFloat(await g("container-fps")) || 0;
+  mp.frames = Math.round(v.currentTime * (fps || 0));
+}
 function renderStats(){
+  if (engine === "mpv") mpvStatsRefresh();
   const it = list[idx], q = v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality() : null, now = performance.now();
   let fps = "—";
   if (q && statsPrev && !v.paused) fps = ((q.totalVideoFrames - statsPrev.f) / ((now - statsPrev.t) / 1000)).toFixed(1);
@@ -2032,7 +2432,8 @@ function renderStats(){
     ["Audio", `${ts.length ? `track ${at + 1}/${ts.length} · ` : ""}volume ${Math.round(saved.volume * 100)}%${settings.eq.boost > 100 ? ` · boost ${settings.eq.boost}%` : ""}${settings.eq.on ? " · EQ" : ""}${settings.eq.normalize ? " · normalized" : ""}`],
     ["Subtitles", activeSub >= 0 ? subs[activeSub].label + (subDelay ? ` · ${subDelay > 0 ? "+" : ""}${subDelay.toFixed(1)} s` : "") : "off"],
     ...(geo.zoom > 100.5 || geo.aspect !== "auto" ? [["Picture", `${geo.aspect === "auto" ? "original aspect" : geo.aspect} · zoom ${Math.round(geo.zoom)}%`]] : []),
-    ["Engine", "Microsoft Edge WebView2 · hardware decoding"],
+    ["Engine", engine === "mpv" ? `libmpv (extended engine)${mpvStats.hw ? ` · ${mpvStats.hw}` : ""}` : "Microsoft Edge WebView2 · hardware decoding"],
+    ...(engine === "mpv" ? [["Codecs", [mpvStats.vc, mpvStats.ac].filter(Boolean).join(" · ") || "—"], ...(it?.why ? [["Why", it.why]] : [])] : []),
   ];
   $("statsBody").innerHTML = rows.map(([k2, x]) => `<div><span>${esc(k2)}</span><b>${esc(x)}</b></div>`).join("");
 }
@@ -2151,7 +2552,41 @@ function thumbsModal(){
     } catch (e) { prog.textContent = "Couldn't create thumbnails: " + (e.message || e); $("thGo").disabled = false; }
   };
 }
-function buildThumbs(it, { cols, rows, width }, onProgress){
+function buildThumbs(it, opt, onProgress){
+  return engine === "mpv" ? buildThumbsMpv(it, opt, onProgress) : buildThumbsWeb(it, opt, onProgress);
+}
+async function buildThumbsMpv(it, { cols, rows, width }, onProgress){
+  const n = cols * rows, pad = Math.round(width * .008), head = Math.round(width * .055);
+  const ar = v.videoWidth / v.videoHeight, dur = v.duration;
+  const tw = Math.floor((width - pad * (cols + 1)) / cols), th = Math.round(tw / ar);
+  const c = document.createElement("canvas"); c.width = width; c.height = head + rows * (th + pad) + pad;
+  const g = c.getContext("2d");
+  thumbHeader(g, c, it, pad, head, `${v.videoWidth}×${v.videoHeight} · ${fmt(dur)}${it.size ? ` · ${bytes(it.size)}` : ""} · Lumen`);
+  for (let i = 0; i < n; i++) {
+    onProgress(i + 1, n);
+    const t = dur * (i + 1) / (n + 1);
+    const im = await mpvFrameImage(t, tw, true);
+    const x = pad + (i % cols) * (tw + pad), y = head + pad + Math.floor(i / cols) * (th + pad);
+    g.drawImage(im, x, y, tw, th); thumbStamp(g, t, x, y, tw, th);
+  }
+  return c.toDataURL("image/png");
+}
+function thumbHeader(g, c, it, pad, head, line){
+  g.fillStyle = "#0d0e11"; g.fillRect(0, 0, c.width, c.height);
+  const [a] = accentColors();
+  g.fillStyle = a; g.fillRect(pad, pad, 6, head - pad * 2);
+  g.fillStyle = "#eceef2"; g.font = `600 ${Math.round(head * .32)}px "Segoe UI",system-ui,sans-serif`; g.textBaseline = "top";
+  g.fillText(it.name, pad * 2 + 6, pad + head * .08, c.width - pad * 4);
+  g.fillStyle = "#9298a5"; g.font = `${Math.round(head * .24)}px "Segoe UI",system-ui,sans-serif`;
+  g.fillText(line, pad * 2 + 6, pad + head * .5, c.width - pad * 4);
+}
+function thumbStamp(g, t, x, y, tw, th){
+  const label = fmt(t); g.font = `600 ${Math.max(11, Math.round(th * .09))}px "Cascadia Mono",Consolas,monospace`;
+  const lw = g.measureText(label).width + 10, lh = Math.max(15, Math.round(th * .13));
+  g.fillStyle = "rgba(0,0,0,.65)"; g.fillRect(x + tw - lw - 4, y + th - lh - 4, lw, lh);
+  g.fillStyle = "#fff"; g.textBaseline = "middle"; g.fillText(label, x + tw - lw + 1, y + th - lh / 2 - 4);
+}
+function buildThumbsWeb(it, { cols, rows, width }, onProgress){
   return new Promise((resolve, reject) => {
     const tv = document.createElement("video"); tv.muted = true; tv.preload = "auto"; tv.src = it.url;
     const n = cols * rows, pad = Math.round(width * .008), head = Math.round(width * .055);
@@ -2419,5 +2854,5 @@ $("ver").textContent = "v" + VERSION;
 // Rainbow mode recolours the motes each frame from the animated CSS colour
 setInterval(() => { if (document.body.classList.contains("neon-rainbow") && !document.body.classList.contains("gl-sign") && !$("empty").classList.contains("hidden")) moteColor = ""; }, 400);
 
-window.__lumen = { gl: () => NeonGL.stats(), glOn: () => NeonGL.running, get settings(){ return settings; }, get geo(){ return geo; }, get pic(){ return pic; }, get box(){ return box; }, zoomAt: (...a) => zoomAt(...a), get subs(){ return subs; }, get AG(){ return AG; }, keyMap: () => keyMap, get chapters(){ return chapters; }, get saved(){ return saved; }, get list(){ return list; }, get idx(){ return idx; }, afterPlayback: () => afterPlayback(), dragPos };
+window.__lumen = { gl: () => NeonGL.stats(), glOn: () => NeonGL.running, get settings(){ return settings; }, get geo(){ return geo; }, get pic(){ return pic; }, get box(){ return box; }, zoomAt: (...a) => zoomAt(...a), get subs(){ return subs; }, get AG(){ return AG; }, keyMap: () => keyMap, media: v, get subs2(){ return subs; }, applyVideoFilter: () => applyVideoFilter(), applyAudio: () => applyAudio(), engine: () => engine, get chapters(){ return chapters; }, get saved(){ return saved; }, get list(){ return list; }, get idx(){ return idx; }, afterPlayback: () => afterPlayback(), dragPos };
 })();

@@ -3,7 +3,7 @@
   "RT_MANIFEST": {
     "#1": {
       "0409": {
-        "identity": { "name": "Lumen.MediaPlayer", "version": "1.6.1.0" },
+        "identity": { "name": "Lumen.MediaPlayer", "version": "1.7.0.0" },
         "description": "Lumen Media Player",
         "minimum-os": "win10",
         "execution-level": "as invoker",
@@ -16,15 +16,15 @@
   "RT_VERSION": {
     "#1": {
       "0000": {
-        "fixed": { "file_version": "1.6.1.0", "product_version": "1.6.1.0" },
+        "fixed": { "file_version": "1.7.0.0", "product_version": "1.7.0.0" },
         "info": {
           "0409": {
             "CompanyName": "Shane Sahadeo",
             "FileDescription": "Lumen Media Player",
-            "FileVersion": "1.6.1",
+            "FileVersion": "1.7.0",
             "LegalCopyright": "© 2026 Shane Sahadeo. MIT License.",
             "ProductName": "Lumen",
-            "ProductVersion": "1.6.1",
+            "ProductVersion": "1.7.0",
             "OriginalFilename": "Lumen.exe"
           }
         }

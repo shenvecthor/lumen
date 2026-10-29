@@ -6,10 +6,12 @@
 
 **A lightweight, modern media player for Windows that you can make your own.**
 
-One ~7 MB file · no installer · no telemetry · no history unless you ask for it
+Plays practically anything · installer or portable · no telemetry · no history unless you ask for it
 
-[![Download for Windows (x64)](https://img.shields.io/badge/Download-Windows%20x64-ff9a3c?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/shenvecthor/lumen/releases/latest/download/Lumen.exe)
-[![Download for Windows on ARM](https://img.shields.io/badge/Download-Windows%20ARM64-ff7a59?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/shenvecthor/lumen/releases/latest/download/Lumen-arm64.exe)
+[![Download installer (x64)](https://img.shields.io/badge/Download-Installer%20x64-ff9a3c?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/shenvecthor/lumen/releases/latest)
+[![Download portable (x64)](https://img.shields.io/badge/Download-Portable%20zip%20x64-ff7a59?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/shenvecthor/lumen/releases/latest)
+
+ARM64 (Snapdragon / Surface) builds are on the [latest release page](https://github.com/shenvecthor/lumen/releases/latest).
 
 [![Latest release](https://img.shields.io/github/v/release/shenvecthor/lumen?label=latest&color=444)](https://github.com/shenvecthor/lumen/releases/latest)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-444)
@@ -40,25 +42,29 @@ Made with ♥ by **Shane Sahadeo**
 
 ## Download
 
-| Your PC | File | Size |
+Get both from the [latest release](https://github.com/shenvecthor/lumen/releases/latest):
+
+| Your PC | Installer | Portable |
 |---|---|---|
-| Most Windows PCs (Intel / AMD) | [**Lumen.exe**](https://github.com/shenvecthor/lumen/releases/latest/download/Lumen.exe) | 7.7 MB |
-| Windows on ARM (Snapdragon laptops, Surface Pro X / 11) | [**Lumen-arm64.exe**](https://github.com/shenvecthor/lumen/releases/latest/download/Lumen-arm64.exe) | 7.2 MB |
+| Most Windows PCs (Intel / AMD) | `Lumen-Setup-<version>-x64.exe` | `Lumen-<version>-portable-x64.zip` |
+| Windows on ARM (Snapdragon laptops, Surface Pro X / 11) | `Lumen-Setup-<version>-arm64.exe` | `Lumen-<version>-portable-arm64.zip` |
 
-All versions and checksums are on the [Releases page](https://github.com/shenvecthor/lumen/releases).
+All versions and SHA-256 checksums are on the [Releases page](https://github.com/shenvecthor/lumen/releases).
 
-**Running it:** Lumen is a single file. Put it anywhere (for example `Documents\Apps`) and double-click it. Nothing is installed.
+**Installer:** installs for your account only, so no administrator prompt (you can choose "all users" instead). It adds Lumen to the Start menu, to *Open with* for video and audio files and to Windows' Default Apps list, with an optional desktop shortcut. Uninstall from *Settings → Apps*; it asks whether to keep your settings.
+
+**Portable:** unzip anywhere (a USB stick works) and run `Lumen.exe`. Keep the `engine` folder next to it. Nothing is installed; settings go to `%LOCALAPPDATA%\Lumen`.
 
 **"Windows protected your PC":** the exe isn't code-signed yet, so SmartScreen may warn the first time. Click *More info → Run anyway*. You can compare the file's SHA-256 with the one on the release page if you want to be sure it's the original.
 
-**Make it your default player:** right-click a video → *Open with* → *Choose another app* → *More apps* → *Look for another app on this PC* → pick `Lumen.exe`, and tick *Always use this app*.
+**Make it your default player:** after installing, open *Settings → Apps → Default apps → Lumen* and pick the file types, or right-click a video → *Open with* → *Lumen* → *Always*.
 
 **Requirements:** Windows 10 or 11 with the Microsoft Edge WebView2 Runtime. It ships with Windows 11 and is already on almost every updated Windows 10 PC. If it's missing, Lumen offers to open Microsoft's download page.
 
 ## Highlights
 
 - **Starts clean, every time.** Lumen always opens empty. It never reopens your last file or playlist by itself.
-- **Plays the files you have.** MP4, MKV, WebM, MOV, MP3, FLAC and more, using the hardware video decoding already built into Windows.
+- **Plays practically anything.** Common files use the hardware decoding built into Windows; everything else (AVI, WMV, MPEG, TS, HEVC, DTS / Dolby audio, Blu-ray and DVD subtitles…) switches automatically to the bundled extended engine, libmpv. Same interface, same features.
 - **Subtitles done properly.** Embedded MKV subtitles are found automatically; subtitles sit inside the picture with a safe margin from the edge, and a live-preview subtitle studio lets you style them.
 - **Right-click for everything.** A quick menu at the cursor with playback, tracks, picture, window and settings.
 - **Borrowed from MPC-HC.** Chapters, smart Next/Previous through chapters → playlist → folder, audio track switching, Go to time, statistics, volume normalization, video size presets, after-playback actions, favorites, thumbnails and playlists.
@@ -67,6 +73,12 @@ All versions and checksums are on the [Releases page](https://github.com/shenvec
 - **Make it yours.** Themes, accent colours, fonts, an optional neon look, remappable shortcuts, a configurable control bar and mouse.
 
 ## All features
+
+### Two engines, one player
+- **Windows' built-in player (Edge WebView2)** handles MP4, MKV and WebM with H.264, VP9 or AV1, and MP3, AAC, FLAC, Opus and Vorbis — fast to start and hardware-decoded.
+- **The extended engine ([libmpv](https://mpv.io) with [FFmpeg](https://ffmpeg.org), LGPL builds)** plays everything else: AVI (DivX/Xvid), WMV/ASF, MPEG-1/2, VOB, MPEG-TS/M2TS, FLV, RealMedia, HEVC without the Store extension, Dolby Digital (AC-3/E-AC-3), DTS and TrueHD audio, APE, WMA, WavPack, AIFF and more, plus Blu-ray (PGS) and DVD subtitles and full ASS styling.
+- **Automatic:** Lumen reads each file's header (not the whole file) and picks the engine. It tells you when the extended engine is used and why ("DTS audio", "AVI file"…). Settings → General → *Playback engine* lets you choose Automatic, Always extended, or Built-in only.
+- **Everything keeps working** on both engines: controls, seek-bar previews, chapters, audio and subtitle tracks, subtitle styling, colour adjustments, EQ, boost, normalization, zoom and pinch, rotation, ambient light, statistics, snapshots and thumbnail sheets.
 
 ### Playback
 - Play, pause, stop, previous/next, skip back/forward (5–30 s, your choice), frame-by-frame stepping while paused.
@@ -192,16 +204,15 @@ These are the defaults. Every one can be changed in Settings → Keyboard shortc
 
 ## Supported formats
 
-Lumen plays media through the engine built into Windows' Edge WebView2, with hardware decoding:
+| Kind | Built-in engine (Edge WebView2) | Extended engine (libmpv + FFmpeg) |
+|---|---|---|
+| Containers | MP4, M4V, MOV, MKV, WebM, Ogg | AVI, DivX, WMV/ASF, MPEG-1/2, VOB, MPEG-TS, M2TS/MTS, FLV/F4V, 3G2, RealMedia, OGM, MXF, DV, NUT, raw H.264/HEVC — plus everything on the left |
+| Video | H.264, VP8, VP9, AV1 | HEVC/H.265 (hardware-decoded, no Store extension needed), MPEG-4 Part 2 (DivX/Xvid), MPEG-1/2, VC-1/WMV, ProRes, Theora and more |
+| Audio | AAC, MP3, FLAC, Opus, Vorbis, WAV | Dolby Digital (AC-3), E-AC-3, DTS / DTS-HD, TrueHD, ALAC, APE, WMA, WavPack, TTA, Musepack, AIFF, AMR, DSD, PCM, tracker modules |
+| Subtitles | SRT, SSA/ASS, WebVTT (files or embedded) | the same with full ASS styling, plus Blu-ray PGS, DVD VobSub and DVB subtitles |
+| Playlists | M3U, M3U8 (local files; web addresses in them are skipped) | |
 
-| Kind | Formats |
-|---|---|
-| Video | MP4 (H.264/AAC), MKV and WebM (H.264, VP8, VP9, AV1), MOV (H.264). HEVC/H.265 plays if the PC has the HEVC Video Extension and hardware support. |
-| Audio | MP3, M4A/AAC, FLAC, WAV, Ogg, Opus, Vorbis |
-| Subtitles | SRT, SSA/ASS, WebVTT, as files or embedded in MKV/WebM |
-| Playlists | M3U, M3U8 (local files; web addresses in them are skipped) |
-
-Not supported by the engine: AC-3 / E-AC-3 / DTS audio (common in some movie MKVs, where the video may play silently or not at all), AVI with DivX/Xvid, and WMV. Image-based subtitles (Blu-ray PGS, DVD VobSub) can't be shown; text subtitles can.
+The extended engine ships in the installer and the portable zip. If its `engine` folder is missing, Lumen still plays everything in the left column.
 
 ## Privacy and your data
 
@@ -213,7 +224,7 @@ Not supported by the engine: AC-3 / E-AC-3 / DTS audio (common in some movie MKV
 
 ## Building from source
 
-You need Go 1.24 or newer. Lumen is pure Go (no C compiler) and cross-compiles from Windows, macOS or Linux.
+You need Go 1.24 or newer. Lumen itself is pure Go (no C compiler) and cross-compiles from Windows, macOS or Linux. The extended engine is loaded at run time from an `engine` folder next to `Lumen.exe`.
 
 ```sh
 git clone https://github.com/shenvecthor/lumen.git
@@ -233,7 +244,9 @@ go test ./...
 
 On Windows (PowerShell), set the variables with `$env:GOOS="windows"` and so on, or simply run `go build -ldflags "-H windowsgui -s -w" -o Lumen.exe .`
 
-**Development:** `go run .` on Linux or macOS starts a small harness that serves the interface to a normal browser for testing. On Windows, set `LUMEN_DEBUG=1` to enable DevTools (F12), the browser's own context menu and browser shortcuts.
+**The extended engine** (LGPL libmpv + FFmpeg for x64 and ARM64) is compiled from source by the [Engine workflow](.github/workflows/engine.yml) on GitHub Actions and published as an `engine-<n>` release; the [Release workflow](.github/workflows/release.yml) adds it to the installers ([Inno Setup](https://jrsoftware.org/isinfo.php) script in `installer/`) and portable zips. To build your own: run the Engine workflow in your fork, or unzip an engine release into an `engine` folder next to your `Lumen.exe`.
+
+**Development:** `go run .` on Linux or macOS starts a small harness that serves the interface to a normal browser for testing; `LUMEN_UI_DIR=. go run -tags lumenmpv .` also serves the UI straight from the source folder and drives a real libmpv (install `libmpv-dev`). On Windows, set `LUMEN_DEBUG=1` to enable DevTools (F12), the browser's own context menu and browser shortcuts.
 
 ### Project layout
 
@@ -241,7 +254,12 @@ On Windows (PowerShell), set the variables with `$env:GOOS="windows"` and so on,
 |---|---|
 | `main_windows.go` | Window, WebView2 setup, dialogs, bindings between the interface and Windows |
 | `server.go` | Loopback media server, folder and playlist expansion, subtitle discovery |
-| `mkv.go` | Matroska/EBML reader for embedded subtitles and chapters |
+| `mkv.go` | Matroska/EBML reader for embedded subtitles, chapters and track codecs |
+| `probe.go` | Chooses the engine for each file from its header (MKV and MP4 codecs, container type) |
+| `mpv.go`, `mpv_windows.go` | libmpv engine: player, events, frame grabber; Windows loader (plain syscalls, no cgo) |
+| `engine_windows.go` | The native video window under the interface, and the engine's bindings |
+| `engine/shim.c` | Tiny helper DLL built with the engine (lets ARM64 call `mpv_wait_event`) |
+| `installer/lumen.iss` | Inno Setup installer script |
 | `aspect.go` | Window-shape maths (aspect lock, fit, video size presets) |
 | `instance_windows.go` | Single-window handoff |
 | `main_other.go` | Development harness for non-Windows systems |
@@ -253,7 +271,7 @@ On Windows (PowerShell), set the variables with `$env:GOOS="windows"` and so on,
 
 - **Backend:** Go with the open-source [go-webview2](https://github.com/jchv/go-webview2) bindings (MIT), vendored with a small addition that exposes WebView2 settings and a `WM_SIZING` hook for the aspect-locked window.
 - **Frontend:** plain HTML, CSS and JavaScript embedded in the exe. No framework, no bundler.
-- **Playback:** the Edge WebView2 media engine, so decoding uses the same hardware acceleration as Windows itself.
+- **Playback:** the Edge WebView2 media engine for common formats, so decoding uses the same hardware acceleration as Windows itself. For everything else, libmpv draws into a native child window that sits *under* the WebView2 interface; the page turns transparent over the picture, so every control, menu and panel works unchanged on top. A second, hidden libmpv instance decodes single frames on the CPU (its software renderer) for seek-bar previews, thumbnail sheets, ambient light and the zoom minimap.
 - **Subtitles:** read from the file by a small Matroska/EBML parser that skips video and audio data and reads only subtitle blocks and chapters. Lumen draws subtitles itself so they can sit inside the picture.
 - **Audio:** a Web Audio graph (10 biquad filters, compressor for normalization, gain, stereo panner, analyser) that's only built when an audio feature or the visualizer needs it.
 - **Neon start screen:** a WebGL2 renderer with HDR bloom, instanced GPU sparks and ACES tone mapping. It steps its quality down automatically, falls back to CSS on slow or software-only graphics, and stops completely while a video plays.
@@ -268,6 +286,7 @@ See [CHANGELOG.md](CHANGELOG.md) for everything that changed in each version.
 Lumen is designed and published by **Shane Sahadeo**.
 
 - [go-webview2](https://github.com/jchv/go-webview2) by John Chadwick and contributors (MIT).
+- [mpv](https://mpv.io) (libmpv, built LGPL-2.1-or-later) and [FFmpeg](https://ffmpeg.org) (LGPL build) power the extended engine, with libass, libplacebo, dav1d and others; the full list and licenses ship in `engine\THIRD-PARTY-NOTICES.txt` and `engine\licenses`.
 - Several navigation and playback features are inspired by [MPC-HC](https://github.com/clsid2/mpc-hc), the classic Windows player.
 
-Released under the [MIT License](LICENSE).
+Lumen itself is released under the [MIT License](LICENSE). The extended engine's libraries keep their own licenses (LGPL-2.1-or-later and permissive licenses); they are separate DLLs you can replace with your own builds.

@@ -96,9 +96,9 @@ func u16(s string) *uint16 { p, _ := windows.UTF16PtrFromString(s); return p }
 
 // openDialog shows the native multi-select file picker.
 func openDialog(owner uintptr, subsOnly bool) []string {
-	filter := "Media files\x00*.mp4;*.m4v;*.webm;*.mkv;*.mov;*.ogv;*.mp3;*.m4a;*.aac;*.flac;*.wav;*.ogg;*.opus;*.weba;*.mka;*.srt;*.vtt;*.ass;*.ssa;*.m3u;*.m3u8\x00" +
+	filter := "Media files\x00" + mediaPatterns("") + ";*.srt;*.vtt;*.ass;*.ssa;*.m3u;*.m3u8\x00" +
 		"Playlists\x00*.m3u;*.m3u8\x00" +
-		"Video\x00*.mp4;*.m4v;*.webm;*.mkv;*.mov;*.ogv\x00Audio\x00*.mp3;*.m4a;*.aac;*.flac;*.wav;*.ogg;*.opus;*.weba;*.mka\x00" +
+		"Video\x00" + mediaPatterns("video") + "\x00Audio\x00" + mediaPatterns("audio") + "\x00" +
 		"Subtitles\x00*.srt;*.vtt;*.ass;*.ssa\x00All files\x00*.*\x00\x00"
 	title := "Open media"
 	if subsOnly {
@@ -207,16 +207,16 @@ func failed(hr uintptr) bool { return int32(uint32(hr)) < 0 }
 func pickFolder(owner uintptr) string {
 	pCoInitializeEx.Call(0, 0x2) // COINIT_APARTMENTTHREADED; harmless if already initialised
 	var dlg unsafe.Pointer
-	if hr, _, _ := pCoCreateInstance.Call(uintptr(unsafe.Pointer(&clsidFileOpenDialog)), 0, 1 /*CLSCTX_INPROC_SERVER*/,
+	if hr, _, _ := pCoCreateInstance.Call(uintptr(unsafe.Pointer(&clsidFileOpenDialog)), 0, 1, /*CLSCTX_INPROC_SERVER*/
 		uintptr(unsafe.Pointer(&iidIFileOpenDialog)), uintptr(unsafe.Pointer(&dlg))); failed(hr) || dlg == nil {
 		return ""
 	}
 	defer comCall(dlg, 2) // Release
 	var opts uint32
-	comCall(dlg, 10, uintptr(unsafe.Pointer(&opts)))                  // GetOptions
-	comCall(dlg, 9, uintptr(opts|0x20 /*PICKFOLDERS*/|0x40 /*FORCEFILESYSTEM*/|0x800 /*PATHMUSTEXIST*/)) // SetOptions
-	comCall(dlg, 17, uintptr(unsafe.Pointer(u16("Open folder"))))     // SetTitle
-	if failed(comCall(dlg, 3, owner)) {                                // Show (fails on cancel)
+	comCall(dlg, 10, uintptr(unsafe.Pointer(&opts)))                                                       // GetOptions
+	comCall(dlg, 9, uintptr(opts|0x20 /*PICKFOLDERS*/ |0x40 /*FORCEFILESYSTEM*/ |0x800 /*PATHMUSTEXIST*/)) // SetOptions
+	comCall(dlg, 17, uintptr(unsafe.Pointer(u16("Open folder"))))                                          // SetTitle
+	if failed(comCall(dlg, 3, owner)) {                                                                    // Show (fails on cancel)
 		return ""
 	}
 	var item unsafe.Pointer
@@ -430,7 +430,9 @@ func main() {
 		ncW, ncH, sc, wa := frame()
 		return lockAspect(edge, r, ncW, ncH, int32(aspect.extraW*sc+.5), int32(aspect.extraH*sc+.5), aspect.ratio, wa.R-wa.L, wa.B-wa.T)
 	}
-	w.Bind("lumenAspect", func(ratio, extraW, extraH float64) { aspect.ratio, aspect.extraW, aspect.extraH = ratio, extraW, extraH })
+	w.Bind("lumenAspect", func(ratio, extraW, extraH float64) {
+		aspect.ratio, aspect.extraW, aspect.extraH = ratio, extraW, extraH
+	})
 	w.Bind("lumenFitWindow", func(ratio, extraW, extraH float64) bool {
 		if z, _, _ := pIsZoomed.Call(win.hwnd); z != 0 || win.full || ratio <= 0 {
 			return false
@@ -538,8 +540,13 @@ func main() {
 		}
 	})
 
+	// Optional libmpv engine for formats WebView2 can't play (engine folder next to the exe).
+	eng := &engine{w: w, parent: win.hwnd, scale: func() float64 { _, _, s, _ := frame(); return s }}
+	eng.bind(srv)
+
 	w.Navigate(srv.AppURL())
 	w.Run()
+	eng.close()
 }
 
 // powerAction runs an MPC-HC style "after playback" action.

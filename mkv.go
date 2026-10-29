@@ -92,12 +92,12 @@ func supportedSubCodec(c string) bool {
 // ---------- buffered random-access reader ----------
 
 type ebmlReader struct {
-	f       io.ReaderAt
-	size    int64
-	pos     int64
-	buf     []byte
-	bufAt   int64
-	bufLen  int
+	f      io.ReaderAt
+	size   int64
+	pos    int64
+	buf    []byte
+	bufAt  int64
+	bufLen int
 }
 
 func (r *ebmlReader) byteAt(p int64) (byte, error) {
@@ -181,7 +181,13 @@ type mkvFile struct {
 	tracks   map[uint64]*SubTrack
 	order    []uint64
 	chapters []Chapter
-	chapPos  int64 // where the SeekHead says Chapters live (they may follow the clusters)
+	chapPos  int64        // where the SeekHead says Chapters live (they may follow the clusters)
+	codecs   []trackCodec // every track's type and codec, for choosing a playback engine
+}
+
+type trackCodec struct {
+	Type  uint64 // 1 video, 2 audio, 0x11 subtitles
+	Codec string
 }
 
 func (m *mkvFile) parseSeekHead(r *ebmlReader, end, segStart int64) {
@@ -340,6 +346,7 @@ func (m *mkvFile) parseTracks(r *ebmlReader, end int64) error {
 				}
 				r.pos = cnext
 			}
+			m.codecs = append(m.codecs, trackCodec{ttype, t.Codec})
 			if ttype == 0x11 && supportedSubCodec(t.Codec) && !t.crypt {
 				if t.Lang == "" {
 					t.Lang = "eng" // Matroska default

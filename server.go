@@ -10,8 +10,8 @@ package main
 import (
 	"crypto/rand"
 	"embed"
-	"encoding/json"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"io/fs"
 	"mime"
@@ -29,6 +29,15 @@ import (
 
 //go:embed ui
 var uiFS embed.FS
+
+// uiFiles is the embedded interface, or the source folder when LUMEN_UI_DIR
+// points at the project (development: edit and reload without rebuilding).
+func uiFiles() fs.FS {
+	if d := os.Getenv("LUMEN_UI_DIR"); d != "" {
+		return os.DirFS(d)
+	}
+	return uiFS
+}
 
 var mediaExt = map[string]string{
 	".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm", ".mkv": "video/webm", ".mka": "audio/webm",
@@ -306,7 +315,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch rest {
 	case "", "index.html":
-		b, _ := fs.ReadFile(uiFS, "ui/index.html")
+		b, _ := fs.ReadFile(uiFiles(), "ui/index.html")
 		h.Set("Content-Type", "text/html; charset=utf-8")
 		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; img-src 'self' data: blob:; connect-src 'self' blob:")
 		w.Write(b)
@@ -377,7 +386,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		// other UI assets (app.js, app.css, …) embedded next to index.html
 		if ct, ok := map[string]string{".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8"}[filepath.Ext(rest)]; ok && !strings.Contains(rest, "/") {
-			if b, err := fs.ReadFile(uiFS, "ui/"+rest); err == nil {
+			if b, err := fs.ReadFile(uiFiles(), "ui/"+rest); err == nil {
 				h.Set("Content-Type", ct)
 				w.Write(b)
 				return
