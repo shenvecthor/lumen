@@ -46,7 +46,7 @@ jobs:
         with:
           msystem: ${{ matrix.msystem }}
           update: true
-          install: git make diffutils
+          install: git make diffutils zip
           pacboy: >-
             toolchain:p meson:p ninja:p pkgconf:p ntldd:p
             nasm:p dav1d:p libass:p libplacebo:p lcms2:p libjpeg-turbo:p zlib:p
@@ -129,7 +129,9 @@ jobs:
           # refuse to ship anything licensed GPL-only
           if grep -E '  GPL|spdx:GPL' $OUT/THIRD-PARTY-NOTICES.txt | grep -viE 'LGPL|FTL|OR|exception'; then echo "::error::GPL-only library found"; exit 1; fi
           ls -la $OUT; du -sh $OUT
-          cd out && 7z a -tzip -mx=9 ../lumen-engine-${{ matrix.arch }}.zip engine >/dev/null
+          echo "::notice title=engine ${{ matrix.arch }}::$(du -sh $OUT | cut -f1), $(ls $OUT/*.dll | wc -l) DLLs: $(cd $OUT && ls *.dll | tr '\n' ' ')"
+          echo "::notice title=notices ${{ matrix.arch }}::$(sed 's/%/%25/g' $OUT/THIRD-PARTY-NOTICES.txt | awk '{printf "%s%%0A", $0}')"
+          cd out && zip -qr9 ../lumen-engine-${{ matrix.arch }}.zip engine
 
       - name: Show the end of the build log on failure
         if: failure()
