@@ -18,6 +18,7 @@ permissions:
 env:
   MPV_VERSION: v0.41.0
   FFMPEG_VERSION: n8.1.3
+  ENGINE_REV: "1"   # bump to force a full recompile
 
 jobs:
   build:
@@ -52,10 +53,19 @@ jobs:
             nasm:p dav1d:p libass:p libplacebo:p lcms2:p libjpeg-turbo:p zlib:p
             shaderc:p spirv-cross:p zimg:p ${{ matrix.extra }}
 
+      # compiled FFmpeg + libmpv are cached, so packaging changes don't recompile
+      - name: Restore compiled engine
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: prefix
+          key: engine-${{ matrix.arch }}-${{ env.MPV_VERSION }}-${{ env.FFMPEG_VERSION }}-${{ env.ENGINE_REV }}
+
       - name: FFmpeg (LGPL, decoders + hardware decoding)
+        if: steps.cache.outputs.cache-hit != 'true'
         run: |
           set -eo pipefail
-          P=$HOME/prefix; mkdir -p $P
+          P=$(cygpath -u "$GITHUB_WORKSPACE")/prefix; mkdir -p $P
           git clone -q --depth 1 -b $FFMPEG_VERSION https://github.com/FFmpeg/FFmpeg ffmpeg
           cd ffmpeg
           CCOPT=""; [ "${{ matrix.arch }}" = arm64 ] && CCOPT="--enable-cross-compile --host-cc=clang --cc=clang --cxx=clang++ --ar=llvm-ar --nm=llvm-nm --ranlib=llvm-ranlib"
@@ -70,9 +80,10 @@ jobs:
           make install 2>&1 | tail -n 20 >> ../build.log
 
       - name: libmpv (gpl=false)
+        if: steps.cache.outputs.cache-hit != 'true'
         run: |
           set -eo pipefail
-          P=$HOME/prefix
+          P=$(cygpath -u "$GITHUB_WORKSPACE")/prefix
           git clone -q --depth 1 -b $MPV_VERSION https://github.com/mpv-player/mpv mpv
           cd mpv
           export PKG_CONFIG_PATH=$P/lib/pkgconfig:$PKG_CONFIG_PATH
@@ -88,12 +99,27 @@ jobs:
           meson compile -C build 2>&1 | tail -n 200 >> ../build.log
           meson install -C build 2>&1 | tail -n 20 >> ../build.log
           cd ..
-          cc -O2 -shared -o $P/bin/lumen-mpv.dll engine/shim.c -I$P/include -L$P/lib -lmpv 2>&1 | tee -a build.log
+          mkdir -p $P/share/lumen-licenses/mpv $P/share/lumen-licenses/ffmpeg
+          cp mpv/Copyright mpv/LICENSE.LGPL $P/share/lumen-licenses/mpv/
+          cp ffmpeg/LICENSE.md ffmpeg/COPYING.LGPLv2.1 $P/share/lumen-licenses/ffmpeg/
+
+      - name: Save compiled engine
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: prefix
+          key: engine-${{ matrix.arch }}-${{ env.MPV_VERSION }}-${{ env.FFMPEG_VERSION }}-${{ env.ENGINE_REV }}
+
+      - name: Helper DLL
+        run: |
+          set -eo pipefail
+          P=$(cygpath -u "$GITHUB_WORKSPACE")/prefix
+          cc -O2 -shared -o $P/bin/lumen-mpv.dll engine/shim.c -I$P/include -L$P/lib -lmpv
 
       - name: Collect engine, licenses and notices
         run: |
           set -eo pipefail
-          P=$HOME/prefix
+          P=$(cygpath -u "$GITHUB_WORKSPACE")/prefix
           OUT=$PWD/out/engine; mkdir -p $OUT/licenses
           cp $P/bin/*.dll $OUT/                      # libmpv, FFmpeg (av*, sw*) and the helper
           export PATH="$P/bin:$PATH"
@@ -113,9 +139,7 @@ jobs:
             echo
             echo "Other libraries (binary packages from MSYS2, https://packages.msys2.org; sources at https://github.com/msys2/MINGW-packages):"
           } > $OUT/THIRD-PARTY-NOTICES.txt
-          mkdir -p $OUT/licenses/mpv $OUT/licenses/ffmpeg
-          cp mpv/Copyright mpv/LICENSE.LGPL $OUT/licenses/mpv/
-          cp ffmpeg/LICENSE.md ffmpeg/COPYING.LGPLv2.1 $OUT/licenses/ffmpeg/
+          cp -r $P/share/lumen-licenses/. $OUT/licenses/
           for f in $OUT/*.dll; do
             b=$(basename $f); case $b in libmpv-2.dll|lumen-mpv.dll|av*.dll|sw*.dll) continue;; esac
             pkg=$(pacman -Qqo "$MINGW_PREFIX/bin/$b" 2>/dev/null || echo unknown)
@@ -129,9 +153,9 @@ jobs:
           # refuse to ship anything licensed GPL-only
           if grep -E '  GPL|spdx:GPL' $OUT/THIRD-PARTY-NOTICES.txt | grep -viE 'LGPL|FTL|OR|exception'; then echo "::error::GPL-only library found"; exit 1; fi
           # every dependency must now resolve inside the engine folder (or Windows itself)
-          missing=$(cd $OUT && for d in *.dll; do PATH="$OUT:/c/Windows/System32" ntldd -R "$d" 2>&1 | grep -i "not found" | grep -viE 'api-ms-win|ext-ms-'; done | sort -u)
-          if [ -n "$missing" ]; then echo "::error::unresolved DLLs: $missing"; exit 1; fi
-          ls av*.dll sw*.dll >/dev/null 2>&1 || (cd $OUT && ls av*.dll sw*.dll) || { echo "::error::FFmpeg DLLs missing"; exit 1; }
+          missing=$(cd $OUT && for d in *.dll; do PATH="$OUT:/c/Windows/System32" ntldd -R "$d" 2>&1 | grep -i "not found" | grep -viE 'api-ms-win|ext-ms-' || true; done | sort -u)
+          if [ -n "$missing" ]; then echo "::error::unresolved DLLs: $(echo $missing)"; exit 1; fi
+          ls $OUT/avcodec-*.dll $OUT/avformat-*.dll $OUT/swscale-*.dll >/dev/null || { echo "::error::FFmpeg DLLs missing"; exit 1; }
           ls -la $OUT; du -sh $OUT
           echo "::notice title=engine ${{ matrix.arch }}::$(du -sh $OUT | cut -f1), $(ls $OUT/*.dll | wc -l) DLLs: $(cd $OUT && ls *.dll | tr '\n' ' ')"
           echo "::notice title=notices ${{ matrix.arch }}::$(sed 's/%/%25/g' $OUT/THIRD-PARTY-NOTICES.txt | awk '{printf "%s%%0A", $0}')"
