@@ -2,10 +2,12 @@
 
 package main
 
-// The libmpv engine inside Lumen's window. mpv draws into a child window that
-// sits underneath the WebView2 interface; when the engine is in use the page
-// turns its stage transparent, so the video shows through and every control,
-// menu and panel stays exactly where it is.
+// The libmpv engine inside Lumen's window. mpv draws into its own borderless
+// window kept exactly behind Lumen's video area. Lumen's main window has no
+// redirection surface (WS_EX_NOREDIRECTIONBITMAP) and the page turns its stage
+// transparent, so the video shows through while every control, menu and panel
+// stays exactly where it is. (A child window under WebView2 would be clipped
+// away by the WebView2 window above it, transparent or not.)
 
 import (
 	"encoding/json"
@@ -24,6 +26,9 @@ import (
 )
 
 var (
+	pClientToScreen  = user32.NewProc("ClientToScreen")
+	pIsIconicEng     = user32.NewProc("IsIconic")
+	pIsWindowVisible = user32.NewProc("IsWindowVisible")
 	pCreateWindowExW = user32.NewProc("CreateWindowExW")
 	kernel32         = windows.NewLazySystemDLL("kernel32.dll")
 	pGetModuleHandle = kernel32.NewProc("GetModuleHandleW")
@@ -34,13 +39,13 @@ type engine struct {
 	parent uintptr
 	scale  func() float64
 
-	mu      sync.Mutex
-	api     mpvAPI
-	player  *Player
-	grab    *Grabber
-	video   uintptr // child window mpv draws into
-	clear   bool    // WebView2 background made transparent
-	lastPos [5]int32
+	mu     sync.Mutex
+	api    mpvAPI
+	player *Player
+	grab   *Grabber
+	video  uintptr  // child window mpv draws into
+	clear  bool     // WebView2 background made transparent
+	want   [5]int32 // where the page wants the video, client px (applied once the window exists)
 }
 
 func (e *engine) emit(js string) {
@@ -70,13 +75,15 @@ func (e *engine) start() (*Player, error) {
 	e.api = api
 	if e.video == 0 {
 		e.onUI(func() {
-			const wsChild, wsClipSiblings, wsClipChildren, ssBlackRect = 0x40000000, 0x04000000, 0x02000000, 0x4
+			// unowned (an owned window would always sit above Lumen), no taskbar button, never activated
+			const wsPopup, wsClipChildren, ssBlackRect = 0x80000000, 0x02000000, 0x4
+			const wsExToolWindow, wsExNoActivate = 0x00000080, 0x08000000
 			hinst, _, _ := pGetModuleHandle.Call(0)
-			h, _, _ := pCreateWindowExW.Call(0, uintptr(unsafe.Pointer(u16("STATIC"))), uintptr(unsafe.Pointer(u16(""))),
-				wsChild|wsClipSiblings|wsClipChildren|ssBlackRect, 0, 0, 16, 16, e.parent, 0, hinst, 0)
+			h, _, _ := pCreateWindowExW.Call(wsExToolWindow|wsExNoActivate, uintptr(unsafe.Pointer(u16("STATIC"))), uintptr(unsafe.Pointer(u16("Lumen video"))),
+				wsPopup|wsClipChildren|ssBlackRect, 0, 0, 16, 16, 0, 0, hinst, 0)
 			e.video = h
-			pSetWindowPos.Call(h, 1 /* HWND_BOTTOM */, 0, 0, 0, 0, swpNoMove|swpNoSize|swpNoActivate)
 		})
+		go e.apply()
 		if e.video == 0 {
 			return nil, errors.New("couldn't create the video window")
 		}
@@ -108,28 +115,54 @@ func (e *engine) transparent() {
 
 // place moves the video window to the stage (CSS pixels from the page).
 func (e *engine) place(x, y, w, h float64, show bool) {
-	if e.video == 0 {
-		return
-	}
 	s := e.scale()
 	pos := [5]int32{int32(x*s + .5), int32(y*s + .5), int32(w*s + .5), int32(h*s + .5), 0}
 	if show {
 		pos[4] = 1
 	}
 	e.mu.Lock()
-	same := pos == e.lastPos
-	e.lastPos = pos
+	same := pos == e.want
+	e.want = pos
 	e.mu.Unlock()
-	if same {
+	if !same {
+		e.apply()
+	}
+}
+
+// apply keeps the video window exactly behind the stage area of Lumen's window.
+func (e *engine) apply() {
+	e.mu.Lock()
+	pos, video := e.want, e.video
+	e.mu.Unlock()
+	if video == 0 {
 		return
 	}
-	e.w.Dispatch(func() {
-		flags := uintptr(swpNoActivate | 0x0040) // SWP_SHOWWINDOW
-		if !show {
-			flags = swpNoActivate | 0x0080 // SWP_HIDEWINDOW
+	iconic, _, _ := pIsIconicEng.Call(e.parent)
+	visible, _, _ := pIsWindowVisible.Call(e.parent)
+	if pos[4] == 0 || iconic != 0 || visible == 0 || pos[2] <= 0 || pos[3] <= 0 {
+		pSetWindowPos.Call(video, 0, 0, 0, 0, 0, swpNoMove|swpNoSize|swpNoZOrder|swpNoActivate|0x0080) // SWP_HIDEWINDOW
+		return
+	}
+	pt := struct{ X, Y int32 }{pos[0], pos[1]}
+	pClientToScreen.Call(e.parent, uintptr(unsafe.Pointer(&pt)))
+	// match "always on top", then sit directly below Lumen in the Z order
+	ex, _, _ := pGetWindowLongPtrW.Call(e.parent, ^uintptr(19)) // GWL_EXSTYLE (-20)
+	band := uintptr(^uintptr(1))                                // HWND_NOTOPMOST (-2)
+	if ex&0x8 != 0 {
+		band = ^uintptr(0) // HWND_TOPMOST (-1)
+	}
+	pSetWindowPos.Call(video, band, 0, 0, 0, 0, swpNoMove|swpNoSize|swpNoActivate)
+	pSetWindowPos.Call(video, e.parent, uintptr(pt.X), uintptr(pt.Y), uintptr(pos[2]), uintptr(pos[3]), swpNoActivate|0x0040) // SWP_SHOWWINDOW
+}
+
+// follow re-applies the position when Lumen's window moves, resizes, activates or changes Z order.
+func (e *engine) follow(msg uintptr) {
+	switch msg {
+	case 0x0003, 0x0005, 0x0006, 0x0018, 0x0047: // WM_MOVE, WM_SIZE, WM_ACTIVATE, WM_SHOWWINDOW, WM_WINDOWPOSCHANGED
+		if e.video != 0 {
+			e.apply()
 		}
-		pSetWindowPos.Call(e.video, 1 /* HWND_BOTTOM: under the interface */, uintptr(pos[0]), uintptr(pos[1]), uintptr(pos[2]), uintptr(pos[3]), flags)
-	})
+	}
 }
 
 func (e *engine) grabber() (*Grabber, error) {
@@ -161,6 +194,7 @@ func (e *engine) bind(srv *Server) {
 		return out
 	})
 	w.Bind("lumenProbe", func(p string) Probe { return probeFile(p) })
+	webview2.MessageHook = func(msg, wp, lp uintptr) { e.follow(msg) }
 	w.Bind("lumenMpvOpen", func(path string, start float64, paused bool) error {
 		p, err := e.start()
 		if err != nil {

@@ -170,10 +170,15 @@ function setEngine(e){
 // setting always use WebView2; otherwise ask Go which one suits the file.
 async function chooseEngine(it){
   if (!it.path || !hasHost || settings.engine === "web") return "web";
-  if (!(await mpvHost.ready())) return "web";
-  if (settings.engine === "mpv") { it.why = "extended engine always on"; return "mpv"; }
-  try { const p = await mpvHost.probe(it.path); if (p && p.engine === "mpv") { it.why = p.why; return "mpv"; } } catch {}
-  return "web";
+  let why = "";
+  if (settings.engine === "mpv") why = "extended engine always on";
+  else { try { const p = await mpvHost.probe(it.path); if (p && p.engine === "mpv") why = p.why; } catch {} }
+  if (!why) return "web";
+  if (!(await mpvHost.ready())) {             // needed but unavailable: say so, then try the built-in player
+    if (!it.toldMissing) { it.toldMissing = true; toast(`${it.name} needs the extended engine (${why}), which couldn't start: ${mpvHost.why || "not installed"}`, true); }
+    return "web";
+  }
+  it.why = why; return "mpv";
 }
 function mpvOpen(it, autoplay){
   Object.assign(mp, { path: it.path, time: 0, timeAt: performance.now(), dur: NaN, paused: !autoplay, ended: false, seeking: false,
@@ -1895,7 +1900,7 @@ const BUTTONS = [["prevnext","Previous / next"],["skip","Skip back / forward"],[
 let settingsTab = "general";
 function engineNote(){
   if (!hasHost) return "Available in the Windows app";
-  if (mpvHost.ok === false) return "Extended engine not installed — Built-in (Edge WebView2) only" + (mpvHost.why ? "" : "");
+  if (mpvHost.ok === false) return "Extended engine unavailable — " + (mpvHost.why || "not installed") + ". Built-in (Edge WebView2) only.";
   return "Automatic uses Windows' built-in player for common files and the extended engine (libmpv) for everything else";
 }
 function settingsModal(tab){

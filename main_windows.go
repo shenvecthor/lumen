@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode/utf16"
@@ -370,6 +371,11 @@ func main() {
 		"--enable-blink-features=AudioVideoTracks --disable-background-networking --disable-component-update --disable-sync --no-first-run "+
 		"--disable-features=Translate,msSmartScreenProtection,msWebOOUI,msPdfOOUI,OptimizationHints")
 
+	// With the engine present, the window is created without a GDI redirection
+	// surface so the native video can show through the transparent page.
+	if _, err := os.Stat(filepath.Join(engineDir(), "libmpv-2.dll")); err == nil {
+		webview2.ExStyle = 0x00200000 // WS_EX_NOREDIRECTIONBITMAP
+	}
 	w := webview2.NewWithOptions(webview2.WebViewOptions{
 		Debug:     os.Getenv("LUMEN_DEBUG") == "1",
 		AutoFocus: true,
@@ -531,7 +537,10 @@ func main() {
 	w.Bind("lumenFullscreen", func(on bool) { win.setFullscreen(on) })
 	w.Bind("lumenOnTop", func(on bool) { win.setTopmost(on) })
 	w.Bind("lumenLoadState", func() string { b, _ := os.ReadFile(statePath); return string(b) })
+	var saveMu sync.Mutex
 	w.Bind("lumenSaveState", func(s string) {
+		saveMu.Lock()
+		defer saveMu.Unlock()
 		if json.Valid([]byte(s)) && len(s) < 4<<20 {
 			tmp := statePath + ".tmp"
 			if os.WriteFile(tmp, []byte(s), 0o600) == nil {

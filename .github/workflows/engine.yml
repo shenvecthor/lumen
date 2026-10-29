@@ -148,7 +148,21 @@ jobs:
             lic=$(pacman -Qi $pkg 2>/dev/null | sed -n 's/^Licenses *: //p')
             printf '%-34s %-46s %-18s %s\n' "$b" "$pkg" "$ver" "$lic" >> $OUT/THIRD-PARTY-NOTICES.txt
             base=$(echo "$pkg" | sed -E 's/^mingw-w64-[a-z]+-[a-z0-9_]+-//')
-            if [ -d "$MINGW_PREFIX/share/licenses/$base" ]; then cp -r "$MINGW_PREFIX/share/licenses/$base" $OUT/licenses/; fi
+            if [ -d "$MINGW_PREFIX/share/licenses/$base" ]; then cp -r "$MINGW_PREFIX/share/licenses/$base" $OUT/licenses/
+            else   # no license folder in the package: take its LICENSE/COPYING files, or record where the license lives
+              mkdir -p "$OUT/licenses/$base"
+              found=$(pacman -Qlq "$pkg" 2>/dev/null | grep -iE '/(licen[cs]e|copying|copyright)[^/]*$' | grep -v '/$' || true)
+              case $base in   # upstream license texts for packages that don't install one
+                libass) curl -fsSL -o "$OUT/licenses/$base/COPYING" https://raw.githubusercontent.com/libass/libass/master/COPYING || true ;;
+                zimg) curl -fsSL -o "$OUT/licenses/$base/COPYING" https://raw.githubusercontent.com/sekrit-twc/zimg/master/COPYING || true ;;
+              esac
+              if [ -s "$OUT/licenses/$base/COPYING" ]; then :
+              elif [ -n "$found" ]; then for f in $found; do cp "$f" "$OUT/licenses/$base/"; done
+              else
+                url=$(pacman -Qi "$pkg" | sed -n 's/^URL *: //p')
+                printf '%s %s\nLicense: %s\nSource and license text: %s\n' "$base" "$ver" "$lic" "$url" > "$OUT/licenses/$base/LICENSE-INFO.txt"
+              fi
+            fi
           done
           cat $OUT/THIRD-PARTY-NOTICES.txt
           # refuse to ship anything licensed GPL-only

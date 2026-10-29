@@ -144,6 +144,12 @@ func (w *webview) msgcb(msg string) {
 	}
 
 	id := strconv.Itoa(d.ID)
+	// Lumen patch: bound Go functions run off the UI thread, so slow work never
+	// freezes the window and code that needs the UI thread can Dispatch to it.
+	go w.finishBinding(d, id)
+}
+
+func (w *webview) finishBinding(d rpcMessage, id string) {
 	if res, err := w.callbinding(d); err != nil {
 		w.Dispatch(func() {
 			w.Eval("window._rpc[" + id + "].reject(" + jsString(err.Error()) + "); window._rpc[" + id + "] = undefined")
@@ -221,6 +227,9 @@ func (w *webview) callbinding(d rpcMessage) (interface{}, error) {
 
 func wndproc(hwnd, msg, wp, lp uintptr) uintptr {
 	if w, ok := getWindowContext(hwnd).(*webview); ok {
+		if MessageHook != nil { // Lumen patch: observe main-window messages
+			MessageHook(msg, wp, lp)
+		}
 		switch msg {
 		case w32.WMMove, w32.WMMoving:
 			_ = w.browser.NotifyParentWindowPositionChanged()
@@ -324,7 +333,7 @@ func (w *webview) CreateWithOptions(opts WindowOptions) bool {
 	}
 
 	w.hwnd, _, _ = w32.User32CreateWindowExW.Call(
-		0,
+		ExStyle, // Lumen patch: see lumen_ext.go
 		uintptr(unsafe.Pointer(className)),
 		uintptr(unsafe.Pointer(windowName)),
 		0xCF0000, // WS_OVERLAPPEDWINDOW
