@@ -154,7 +154,8 @@ jobs:
           # refuse to ship anything licensed GPL-only
           if grep -E '  GPL|spdx:GPL' $OUT/THIRD-PARTY-NOTICES.txt | grep -viE 'LGPL|FTL|OR|exception'; then echo "::error::GPL-only library found"; exit 1; fi
           # every dependency must now resolve inside the engine folder (or Windows itself)
-          missing=$(cd $OUT && for d in *.dll; do PATH="$OUT:/c/Windows/System32" ntldd -R "$d" 2>&1 | grep -i "not found" | grep -viE 'api-ms-win|ext-ms-' || true; done | sort -u)
+          NT=$(command -v ntldd)
+          missing=$(cd $OUT && for d in *.dll; do PATH="$OUT:/c/Windows/System32" "$NT" -R "$d" 2>&1 | grep -i "not found" | grep -viE 'api-ms-win|ext-ms-' || true; done | sort -u)
           if [ -n "$missing" ]; then echo "::error::unresolved DLLs: $(echo $missing)"; exit 1; fi
           ls $OUT/avcodec-*.dll $OUT/avformat-*.dll $OUT/swscale-*.dll >/dev/null || { echo "::error::FFmpeg DLLs missing"; exit 1; }
           ls -la $OUT; du -sh $OUT
