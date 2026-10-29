@@ -95,8 +95,8 @@ jobs:
           set -eo pipefail
           P=$HOME/prefix
           OUT=$PWD/out/engine; mkdir -p $OUT/licenses
-          cp $P/bin/libmpv-2.dll $OUT/
-          cp $P/bin/lumen-mpv.dll $OUT/
+          cp $P/bin/*.dll $OUT/                      # libmpv, FFmpeg (av*, sw*) and the helper
+          export PATH="$P/bin:$PATH"
           # every DLL libmpv needs that isn't part of Windows
           (ntldd -R $OUT/libmpv-2.dll || ldd $OUT/libmpv-2.dll) | tr '\\' '/' | grep -E '=> [A-Za-z]:/|=> /' | grep -viE '/windows/|not found' | sed -E 's/.*=> ([^ ]+).*/\1/' | sort -u > deps.txt
           cat deps.txt
@@ -128,6 +128,10 @@ jobs:
           cat $OUT/THIRD-PARTY-NOTICES.txt
           # refuse to ship anything licensed GPL-only
           if grep -E '  GPL|spdx:GPL' $OUT/THIRD-PARTY-NOTICES.txt | grep -viE 'LGPL|FTL|OR|exception'; then echo "::error::GPL-only library found"; exit 1; fi
+          # every dependency must now resolve inside the engine folder (or Windows itself)
+          missing=$(cd $OUT && for d in *.dll; do PATH="$OUT:/c/Windows/System32" ntldd -R "$d" 2>&1 | grep -i "not found" | grep -viE 'api-ms-win|ext-ms-'; done | sort -u)
+          if [ -n "$missing" ]; then echo "::error::unresolved DLLs: $missing"; exit 1; fi
+          ls av*.dll sw*.dll >/dev/null 2>&1 || (cd $OUT && ls av*.dll sw*.dll) || { echo "::error::FFmpeg DLLs missing"; exit 1; }
           ls -la $OUT; du -sh $OUT
           echo "::notice title=engine ${{ matrix.arch }}::$(du -sh $OUT | cut -f1), $(ls $OUT/*.dll | wc -l) DLLs: $(cd $OUT && ls *.dll | tr '\n' ' ')"
           echo "::notice title=notices ${{ matrix.arch }}::$(sed 's/%/%25/g' $OUT/THIRD-PARTY-NOTICES.txt | awk '{printf "%s%%0A", $0}')"
