@@ -1,0 +1,163 @@
+name: Engine (LGPL libmpv)
+
+# Builds the optional playback engine Lumen uses for formats Edge WebView2 can't
+# play: FFmpeg without any GPL parts, and libmpv built with -Dgpl=false.
+# Everything is compiled from source here so the LGPL build is reproducible.
+# Output: a release "engine-<n>" with lumen-engine-x64.zip and lumen-engine-arm64.zip.
+on:
+  workflow_dispatch:
+    inputs:
+      build:
+        description: "Engine build number (release tag becomes engine-<n>)"
+        required: true
+        default: "1"
+
+permissions:
+  contents: write
+
+env:
+  MPV_VERSION: v0.41.0
+  FFMPEG_VERSION: n8.1.3
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+            msystem: UCRT64
+            ffarch: x86_64
+            extra: nasm:p
+          - arch: arm64
+            runner: windows-11-arm
+            msystem: CLANGARM64
+            ffarch: aarch64
+            extra: ""
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          install: git make diffutils
+          pacboy: >-
+            toolchain:p meson:p ninja:p pkgconf:p ntldd:p
+            nasm:p dav1d:p libass:p libplacebo:p lcms2:p libjpeg-turbo:p zlib:p
+            shaderc:p spirv-cross:p zimg:p ${{ matrix.extra }}
+
+      - name: FFmpeg (LGPL, decoders + hardware decoding)
+        run: |
+          set -eo pipefail
+          P=$HOME/prefix; mkdir -p $P
+          git clone -q --depth 1 -b $FFMPEG_VERSION https://github.com/FFmpeg/FFmpeg ffmpeg
+          cd ffmpeg
+          CCOPT=""; [ "${{ matrix.arch }}" = arm64 ] && CCOPT="--enable-cross-compile --cc=clang --cxx=clang++ --ar=llvm-ar --nm=llvm-nm --ranlib=llvm-ranlib"
+          ./configure --prefix=$P --arch=${{ matrix.ffarch }} --target-os=mingw32 $CCOPT \
+            --enable-shared --disable-static --disable-programs --disable-doc --disable-debug \
+            --disable-network --disable-avdevice \
+            --enable-d3d11va --enable-dxva2 --enable-libdav1d \
+            --disable-encoders --enable-encoder=png,mjpeg,rawvideo \
+            --disable-muxers --enable-muxer=image2,null 2>&1 | tee ../build.log
+          grep -q 'License: LGPL version 2.1 or later' ../build.log || { echo "::error::FFmpeg is not LGPL"; exit 1; }
+          make -j$(nproc) 2>&1 | tail -n 200 >> ../build.log
+          make install 2>&1 | tail -n 20 >> ../build.log
+
+      - name: libmpv (gpl=false)
+        run: |
+          set -eo pipefail
+          P=$HOME/prefix
+          git clone -q --depth 1 -b $MPV_VERSION https://github.com/mpv-player/mpv mpv
+          cd mpv
+          export PKG_CONFIG_PATH=$P/lib/pkgconfig:$PKG_CONFIG_PATH
+          meson setup build --prefix=$P --buildtype=release \
+            -Dgpl=false -Dlibmpv=true -Dcplayer=false -Dtests=false \
+            -Dlua=disabled -Djavascript=disabled -Dlibarchive=disabled -Dlibbluray=disabled \
+            -Drubberband=disabled -Dvapoursynth=disabled -Duchardet=disabled -Dcplugins=disabled \
+            -Dsdl2-audio=disabled -Dsdl2-video=disabled -Dsdl2-gamepad=disabled \
+            -Dmanpage-build=disabled -Dhtml-build=disabled -Dpdf-build=disabled \
+            -Dd3d11=enabled -Dshaderc=enabled -Dspirv-cross=enabled -Dwasapi=enabled \
+            -Dlcms2=enabled -Djpeg=enabled -Dzimg=enabled -Dvulkan=disabled -Dwin32-smtc=disabled 2>&1 | tee -a ../build.log
+          meson introspect --buildoptions build | python -c "import json,sys; o=[x for x in json.load(sys.stdin) if x['name']=='gpl'][0]; assert o['value'] is False, o" || { echo "::error::mpv was configured with gpl"; exit 1; }
+          meson compile -C build 2>&1 | tail -n 200 >> ../build.log
+          meson install -C build 2>&1 | tail -n 20 >> ../build.log
+
+      - name: Collect engine, licenses and notices
+        run: |
+          set -eo pipefail
+          P=$HOME/prefix
+          OUT=$PWD/out/engine; mkdir -p $OUT/licenses
+          cp $P/bin/libmpv-2.dll $OUT/
+          # every DLL libmpv needs that isn't part of Windows
+          (ntldd -R $OUT/libmpv-2.dll || ldd $OUT/libmpv-2.dll) | tr '\\' '/' | grep -E '=> [A-Za-z]:/|=> /' | grep -viE '/windows/|not found' | sed -E 's/.*=> ([^ ]+).*/\1/' | sort -u > deps.txt
+          cat deps.txt
+          while read -r d; do cp "$(cygpath -u "$d")" $OUT/; done < deps.txt
+          # notices: our own builds + the MSYS2 package that provided each other DLL
+          {
+            echo "Lumen playback engine (LGPL build ${{ github.event.inputs.build }}, ${{ matrix.arch }})"
+            echo "Built by .github/workflows/engine.yml in https://github.com/${{ github.repository }}"
+            echo "Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            echo "libmpv-2.dll   mpv $MPV_VERSION, built with -Dgpl=false (LGPL-2.1-or-later)  https://github.com/mpv-player/mpv/tree/$MPV_VERSION"
+            echo "av*.dll, sw*.dll   FFmpeg $FFMPEG_VERSION, LGPL build (no --enable-gpl, no --enable-nonfree)  https://github.com/FFmpeg/FFmpeg/tree/$FFMPEG_VERSION"
+            echo
+            echo "Other libraries (binary packages from MSYS2, https://packages.msys2.org; sources at https://github.com/msys2/MINGW-packages):"
+          } > $OUT/THIRD-PARTY-NOTICES.txt
+          mkdir -p $OUT/licenses/mpv $OUT/licenses/ffmpeg
+          cp mpv/Copyright mpv/LICENSE.LGPL $OUT/licenses/mpv/
+          cp ffmpeg/LICENSE.md ffmpeg/COPYING.LGPLv2.1 $OUT/licenses/ffmpeg/
+          for f in $OUT/*.dll; do
+            b=$(basename $f); case $b in libmpv-2.dll|av*.dll|sw*.dll) continue;; esac
+            pkg=$(pacman -Qqo "$MINGW_PREFIX/bin/$b" 2>/dev/null || echo unknown)
+            ver=$(pacman -Q $pkg 2>/dev/null | cut -d' ' -f2 || true)
+            lic=$(pacman -Qi $pkg 2>/dev/null | sed -n 's/^Licenses *: //p')
+            printf '%-34s %-46s %-18s %s\n' "$b" "$pkg" "$ver" "$lic" >> $OUT/THIRD-PARTY-NOTICES.txt
+            base=$(echo "$pkg" | sed -E 's/^mingw-w64-[a-z]+-[a-z0-9_]+-//')
+            if [ -d "$MINGW_PREFIX/share/licenses/$base" ]; then cp -r "$MINGW_PREFIX/share/licenses/$base" $OUT/licenses/; fi
+          done
+          cat $OUT/THIRD-PARTY-NOTICES.txt
+          # refuse to ship anything licensed GPL-only
+          if grep -E '  GPL|spdx:GPL' $OUT/THIRD-PARTY-NOTICES.txt | grep -viE 'LGPL|FTL|OR|exception'; then echo "::error::GPL-only library found"; exit 1; fi
+          ls -la $OUT; du -sh $OUT
+          cd out && 7z a -tzip -mx=9 ../lumen-engine-${{ matrix.arch }}.zip engine >/dev/null
+
+      - name: Show the end of the build log on failure
+        if: failure()
+        run: |
+          [ -f build.log ] || exit 0
+          tail -n 120 build.log | grep -v '^\s*$' | tail -n 60 | while IFS= read -r l; do echo "::error::${l//%/%25}"; done | head -n 9
+          tail -n 60 build.log | tr '\n' '\r' | sed 's/\r/%0A/g' | cut -c1-6000 | sed 's/^/::error title=build log tail::/'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lumen-engine-${{ matrix.arch }}
+          path: lumen-engine-${{ matrix.arch }}.zip
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - run: ls -la && sha256sum lumen-engine-*.zip > SHA256SUMS-engine.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: engine-${{ github.event.inputs.build }}
+          target_commitish: ${{ github.sha }}
+          name: Lumen engine build ${{ github.event.inputs.build }} (LGPL libmpv)
+          prerelease: true
+          make_latest: false
+          body: |
+            Optional playback engine bundled with Lumen's installer and portable zips: libmpv (mpv ${{ env.MPV_VERSION }}, built with -Dgpl=false) and FFmpeg ${{ env.FFMPEG_VERSION }} (LGPL build), compiled from source by `.github/workflows/engine.yml`.
+            You don't need to download this separately; it's included in the Lumen downloads.
+          files: |
+            lumen-engine-x64.zip
+            lumen-engine-arm64.zip
+            SHA256SUMS-engine.txt
