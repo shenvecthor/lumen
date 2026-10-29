@@ -87,6 +87,8 @@ jobs:
           meson introspect --buildoptions build | python -c "import json,sys; o=[x for x in json.load(sys.stdin) if x['name']=='gpl'][0]; assert o['value'] is False, o" || { echo "::error::mpv was configured with gpl"; exit 1; }
           meson compile -C build 2>&1 | tail -n 200 >> ../build.log
           meson install -C build 2>&1 | tail -n 20 >> ../build.log
+          cd ..
+          cc -O2 -shared -o $P/bin/lumen-mpv.dll engine/shim.c -I$P/include -L$P/lib -lmpv 2>&1 | tee -a build.log
 
       - name: Collect engine, licenses and notices
         run: |
@@ -94,6 +96,7 @@ jobs:
           P=$HOME/prefix
           OUT=$PWD/out/engine; mkdir -p $OUT/licenses
           cp $P/bin/libmpv-2.dll $OUT/
+          cp $P/bin/lumen-mpv.dll $OUT/
           # every DLL libmpv needs that isn't part of Windows
           (ntldd -R $OUT/libmpv-2.dll || ldd $OUT/libmpv-2.dll) | tr '\\' '/' | grep -E '=> [A-Za-z]:/|=> /' | grep -viE '/windows/|not found' | sed -E 's/.*=> ([^ ]+).*/\1/' | sort -u > deps.txt
           cat deps.txt
@@ -105,6 +108,7 @@ jobs:
             echo "Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             echo
             echo "libmpv-2.dll   mpv $MPV_VERSION, built with -Dgpl=false (LGPL-2.1-or-later)  https://github.com/mpv-player/mpv/tree/$MPV_VERSION"
+            echo "lumen-mpv.dll  small helper from engine/shim.c in the Lumen repository (MIT)"
             echo "av*.dll, sw*.dll   FFmpeg $FFMPEG_VERSION, LGPL build (no --enable-gpl, no --enable-nonfree)  https://github.com/FFmpeg/FFmpeg/tree/$FFMPEG_VERSION"
             echo
             echo "Other libraries (binary packages from MSYS2, https://packages.msys2.org; sources at https://github.com/msys2/MINGW-packages):"
@@ -113,7 +117,7 @@ jobs:
           cp mpv/Copyright mpv/LICENSE.LGPL $OUT/licenses/mpv/
           cp ffmpeg/LICENSE.md ffmpeg/COPYING.LGPLv2.1 $OUT/licenses/ffmpeg/
           for f in $OUT/*.dll; do
-            b=$(basename $f); case $b in libmpv-2.dll|av*.dll|sw*.dll) continue;; esac
+            b=$(basename $f); case $b in libmpv-2.dll|lumen-mpv.dll|av*.dll|sw*.dll) continue;; esac
             pkg=$(pacman -Qqo "$MINGW_PREFIX/bin/$b" 2>/dev/null || echo unknown)
             ver=$(pacman -Q $pkg 2>/dev/null | cut -d' ' -f2 || true)
             lic=$(pacman -Qi $pkg 2>/dev/null | sed -n 's/^Licenses *: //p')
